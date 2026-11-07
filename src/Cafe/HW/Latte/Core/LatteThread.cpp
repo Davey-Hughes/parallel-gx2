@@ -223,6 +223,7 @@ void Latte_GpuPauseGate()
 	if (Latte_GpuMayLeaveGate()) [[likely]]
 		return;
 	sGpuAtPauseGate.store(true, std::memory_order_release);
+	LatteGpuWake_Notify(); // the frontend, waiting for the thread to get here
 	// Below the gate is a command boundary, which makes this the one point in
 	// the thread's life where it holds no half-finished GPU work - so it is
 	// where the contents of the context can be handed back.
@@ -246,6 +247,7 @@ void Latte_GpuPauseGate()
 		else
 		{
 			sGpuParked.store(true, std::memory_order_release);
+			LatteGpuWake_Notify(); // the frontend, waiting for exactly this
 			LatteGpuWake_WaitUntil([] {
 				return !sGpuPauseRequested.load(std::memory_order_acquire) || Latte_GetStopSignal();
 			});
@@ -544,6 +546,7 @@ void Latte_TeardownGpuState(const char* reason)
 	{
 		cemuLog_log(LogType::Force, "[LatteThread] there was no renderer to give anything back to");
 		sGpuHandingContextBack.store(false, std::memory_order_release);
+		LatteGpuWake_Notify(); // libretro_wait_for_gpu_handover
 		return;
 	}
 	// A renderer that never came up has nothing on the context to give back,
@@ -558,6 +561,7 @@ void Latte_TeardownGpuState(const char* reason)
 	{
 		cemuLog_log(LogType::Force, "[LatteThread] the renderer never came up, so there is nothing built on the context; leaving it to the unload");
 		sGpuHandingContextBack.store(false, std::memory_order_release);
+		LatteGpuWake_Notify(); // libretro_wait_for_gpu_handover
 		return;
 	}
 	LatteShaderCache_Close();
@@ -573,6 +577,7 @@ void Latte_TeardownGpuState(const char* reason)
 	sRendererStateInitialized.store(false, std::memory_order_release);
 	cemuLog_log(LogType::Force, "[LatteThread] the graphics context has everything back and the renderer is gone");
 	sGpuHandingContextBack.store(false, std::memory_order_release);
+	LatteGpuWake_Notify(); // libretro_wait_for_gpu_handover
 }
 
 // The other half: a context that went away has come back, the frontend has

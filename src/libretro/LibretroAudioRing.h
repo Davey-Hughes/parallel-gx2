@@ -2,9 +2,11 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <rthreads/retro_eventcount.h>
 
 // Lock-free ring buffer for audio samples.
 // Single producer (Cemu AX audio thread), single consumer (retro_run thread,
@@ -133,4 +135,52 @@ private:
 	std::array<int16_t, kBufferSamples> m_buffer{};
 	std::atomic<size_t> m_write_pos{0};
 	std::atomic<size_t> m_read_pos{0};
+};
+
+// What the consumer sleeps on between pulls that found the ring empty (Audio
+// Thread mode), instead of a fixed sleep: the producer notifies after a block
+// goes in, so the wait ends when the audio arrives. No lock, and a notify with
+// nobody waiting is an atomic increment and nothing else.
+class LibretroAudioFeedWake
+{
+public:
+	LibretroAudioFeedWake() { m_ok = retro_eventcount_init(&m_ec); }
+	~LibretroAudioFeedWake() { if (m_ok) retro_eventcount_free(&m_ec); }
+	LibretroAudioFeedWake(const LibretroAudioFeedWake&) = delete;
+	LibretroAudioFeedWake& operator=(const LibretroAudioFeedWake&) = delete;
+
+	void Notify()
+	{
+		if (m_ok)
+			retro_eventcount_notify(&m_ec);
+	}
+
+	// Until ready() or the deadline - or, with anyWakeEnds, until the first
+	// wake, ready or not. Returns ready().
+	template<typename TReady>
+	bool WaitUntil(TReady ready, std::chrono::steady_clock::time_point deadline, bool anyWakeEnds)
+	{
+		for (;;)
+		{
+			if (ready())
+				return true;
+			const auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+				deadline - std::chrono::steady_clock::now()).count();
+			if (left <= 0 || !m_ok)
+				return false;
+			const int key = retro_eventcount_prepare_wait(&m_ec);
+			if (ready())
+			{
+				retro_eventcount_cancel_wait(&m_ec);
+				return true;
+			}
+			retro_eventcount_commit_wait_timeout(&m_ec, key, left);
+			if (anyWakeEnds)
+				return ready();
+		}
+	}
+
+private:
+	retro_eventcount_t m_ec{};
+	bool m_ok;
 };

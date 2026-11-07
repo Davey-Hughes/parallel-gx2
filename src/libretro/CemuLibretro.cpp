@@ -267,15 +267,21 @@ static void libretro_set_log_to_file(bool toFile)
 	std::abort();
 }
 
-// One step of a wait on the frontend's thread for the GPU to get somewhere.
-// With the GPU on a cothread of this thread, waiting is running it; with a
-// thread of its own, it is a millisecond of sleep.
-static void libretro_gpu_wait_step()
+// A wait on the frontend's thread for the GPU to get somewhere, by the
+// deadline at the latest. With the GPU on a cothread of this thread, waiting is
+// running it; with a thread of its own, it is sleeping until the thread says it
+// got there (LatteGpuWake: reaching the pause gate, parking there, finishing a
+// handover and leaving all notify), not a millisecond at a time.
+template<typename TPred>
+static void libretro_gpu_wait_until(TPred pred, std::chrono::steady_clock::time_point deadline)
 {
 	if (Latte_IsGpuCothread())
-		Latte_ServeGpu();
+	{
+		while (!pred() && std::chrono::steady_clock::now() < deadline)
+			Latte_ServeGpu();
+	}
 	else
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		LatteGpuWake_WaitUntil(pred, deadline);
 }
 
 // Runs on: the frontend's thread, in context_destroy. Says what went wrong and
@@ -304,8 +310,7 @@ static bool libretro_wait_for_gpu_handover(const char* what)
 		return false;
 	cemuLog_log(LogType::Force, "[LatteThread] {}, and it is handing the graphics context back on its way out - waiting for that", what);
 	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-	while (Latte_IsGpuHandingContextBack() && std::chrono::steady_clock::now() < deadline)
-		libretro_gpu_wait_step();
+	libretro_gpu_wait_until([] { return !Latte_IsGpuHandingContextBack(); }, deadline);
 	if (Latte_IsGpuHandingContextBack())
 		cemuLog_log(LogType::Force, "[LatteThread] ten seconds in and the handover is still going; the context goes anyway");
 	else
@@ -654,12 +659,18 @@ static std::atomic_bool s_audio_submission_allowed{true};
 static std::atomic_bool s_audio_thread_active{false};
 static void RETRO_CALLCONV libretro_audio_thread_pull()
 {
-	if (!s_audio_thread_active.load(std::memory_order_relaxed) ||
-		LibretroAudioAPI::PullAudio(512) == 0)
+	if (!s_audio_thread_active.load(std::memory_order_relaxed))
+		return;
+	const size_t sent = LibretroAudioAPI::PullAudio(512);
+	if (sent == 0)
 	{
-		// Nothing to give: RetroArch calls again at once, so wait a little
-		// rather than spin
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		// Nothing given: a frontend may call again at once, so wait - up to
+		// the millisecond this used to sleep, but no longer than it takes AX
+		// to feed the ring (or the thread to be stopped), so the first block
+		// after a gap goes out as it arrives rather than up to a millisecond
+		// later. A frontend that refused what there was gets the full bound.
+		LibretroAudioAPI::WaitForFeed(LibretroAudioAPI::LastPullRefused(), s_audio_thread_active,
+			std::chrono::milliseconds(1));
 	}
 }
 static void RETRO_CALLCONV libretro_audio_thread_state(bool enabled)
@@ -667,6 +678,8 @@ static void RETRO_CALLCONV libretro_audio_thread_state(bool enabled)
 	if (enabled && !s_audio_thread_active.load(std::memory_order_relaxed))
 		LibretroAudioAPI::DropBuffered();
 	s_audio_thread_active.store(enabled, std::memory_order_relaxed);
+	if (!enabled)
+		LibretroAudioAPI::WakeFeedWaiter(); // a stop is not kept waiting
 }
 
 // The size the picture is handed over at when nothing has said otherwise
@@ -5571,8 +5584,7 @@ static void libretro_context_destroy()
 	// gate it will never reach is how that turned into the whole budget spent
 	// and then the teardown racing the device's destruction.
 	const auto gateDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-	while (!Latte_IsGpuAtPauseGate() && Latte_IsGpuThreadAlive() && std::chrono::steady_clock::now() < gateDeadline)
-		libretro_gpu_wait_step();
+	libretro_gpu_wait_until([] { return Latte_IsGpuAtPauseGate() || !Latte_IsGpuThreadAlive(); }, gateDeadline);
 	if (!Latte_IsGpuAtPauseGate())
 	{
 		// It may still arrive, so the request is withdrawn rather than left
@@ -5597,8 +5609,7 @@ static void libretro_context_destroy()
 	// simply still going. Ten seconds is long enough that only a wedge reaches
 	// it.
 	const auto parkDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-	while (!Latte_IsGpuParked() && std::chrono::steady_clock::now() < parkDeadline)
-		libretro_gpu_wait_step();
+	libretro_gpu_wait_until([] { return Latte_IsGpuParked(); }, parkDeadline);
 	libretro_frame_gate_hold_open(false);
 	if (!Latte_IsGpuParked())
 	{

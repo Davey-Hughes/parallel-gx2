@@ -6,6 +6,12 @@
 # the next timed vsync is due. Upstream spins there, a host core kept busy for
 # as long as the emulated CPU takes to send the next command.
 #
+# The frontend's thread, waiting for the GPU thread to reach the pause gate,
+# park there or finish handing the context back (context_destroy), sleeps
+# until the thread says so rather than a millisecond at a time; and
+# RetroArch's audio thread, pulling from an empty ring (Audio Thread), sleeps
+# until AX feeds it, not a fixed millisecond.
+#
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
 # the clock. Each of them used to check every 1 to 50 ms, and the boot paid for
@@ -66,6 +72,13 @@ check src/Cafe/IOSU/nn/iosu_nn_service.cpp 'void IPCService::Start\(\)' 'm_threa
 check src/Cafe/IOSU/ODM/iosu_odm.cpp 'void Initialize\(\)' 's_threadInitialized.Wait()'
 check src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp '^uint32 LatteCP_readU32Deprc\(\)' LatteCP_waitForWork
 check src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp '^static void LatteCP_waitForWork\(\)' LatteGpuWake_WaitUntil
+check src/libretro/CemuLibretro.cpp '^static void libretro_gpu_wait_until\(' LatteGpuWake_WaitUntil
+check src/libretro/CemuLibretro.cpp 'static void RETRO_CALLCONV libretro_audio_thread_pull\(\)' WaitForFeed
+check src/libretro/CemuLibretro.cpp 'static void RETRO_CALLCONV libretro_audio_thread_state\(' WakeFeedWaiter
+check src/libretro/LibretroAudioAPI.cpp '^void LibretroAudioAPI::WaitForFeed\(' WaitUntil
+if pp src/libretro/CemuLibretro.cpp | grep -q 'libretro_gpu_wait_step'; then
+	echo "CemuLibretro.cpp: a GPU wait still steps a millisecond at a time"; fail=1
+fi
 check src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp '^void LatteAsyncCommands_waitUntilAllProcessed\(\)' LatteGpuWake_WaitUntil
 
 if pp $L | grep -q 'condition_variable'; then
@@ -89,6 +102,12 @@ need src/Cafe/GraphicPack/GraphicPack2.cpp 's_isReady = true;' LatteGpuWake_Noti
 need src/Cafe/OS/libs/gx2/GX2_Misc.cpp 'gx2InitCalled++;' LatteGpuWake_Notify
 need src/Cafe/OS/libs/coreinit/coreinit_OSScreen.cpp 'flipRequestCount++;' LatteGpuWake_Notify
 need src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp 'LatteAsyncCommandQueue.push' LatteGpuWake_Notify
+need $L 'sGpuAtPauseGate.store(true' LatteGpuWake_Notify
+need $L 'sGpuParked.store(true' LatteGpuWake_Notify
+need $L 'sGpuHandingContextBack.store(false' LatteGpuWake_Notify
+if ! body src/libretro/LibretroAudioAPI.cpp '^bool LibretroAudioAPI::FeedBlock\(' | grep -q 'GetFeedWake().Notify()'; then
+	echo "FeedBlock does not wake RetroArch's audio thread"; fail=1
+fi
 if ! body src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp '^void LatteAsyncCommands_checkAndExecute\(\)' | tail -3 | grep -q LatteGpuWake_Notify; then
 	echo "LatteAsyncCommands_checkAndExecute does not wake the queue's waiter"; fail=1
 fi

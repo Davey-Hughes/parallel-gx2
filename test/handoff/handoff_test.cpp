@@ -13,6 +13,9 @@
 //    submission or its vsync deadline instead of spinning;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
+//  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
+//    producer's next block (ending as it arrives, not on a fixed millisecond),
+//    a stop, or its bound;
 //  - the audio ring hands out whole frames in place, across the wrap, for 2 and
 //    6 channels, and streams intact between a producer and a consumer thread.
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompilerWorkQueue.h"
@@ -457,6 +460,68 @@ static void TestAudioRingThreads()
 	CHECK(got == kTotal);
 }
 
+// The Audio Thread's pull with nothing to give: LibretroAudioAPI::WaitForFeed
+// as libretro_audio_thread_pull calls it, on the ring and wake the core uses.
+static void TestAudioFeedWait()
+{
+	using clock = std::chrono::steady_clock;
+	auto ring = std::make_unique<LibretroAudioRingBuffer>();
+	LibretroAudioFeedWake wake;
+	std::atomic_bool active{true};
+	const auto ready = [&] {
+		return !active.load(std::memory_order_relaxed) || ring->GetReadAvailableSamples() != 0;
+	};
+
+	// Nothing comes: back at the bound, empty-handed
+	{
+		const auto start = clock::now();
+		CHECK(!wake.WaitUntil(ready, start + std::chrono::milliseconds(20), false));
+		CHECK(clock::now() - start >= std::chrono::milliseconds(20));
+	}
+	// A block arrives well inside a long bound: the wait ends with it, every
+	// time - a fixed sleep would end at the bound instead
+	for (int round = 0; round < 50; round++)
+	{
+		std::thread producer([&] {
+			std::this_thread::sleep_for(std::chrono::microseconds(200));
+			int16_t block[480 * 2] = {};
+			ring->Write(block, 480 * 2);
+			wake.Notify();
+		});
+		const auto start = clock::now();
+		const bool got = wake.WaitUntil(ready, start + std::chrono::seconds(30), false);
+		producer.join();
+		CHECK(got);
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+		ring->Discard(ring->GetReadAvailableSamples());
+	}
+	// The frontend stops its audio thread: set_state(false) clears active and
+	// wakes the wait, which does not run on to the bound
+	{
+		std::thread state([&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			active.store(false, std::memory_order_relaxed);
+			wake.Notify();
+		});
+		const auto start = clock::now();
+		CHECK(wake.WaitUntil(ready, start + std::chrono::seconds(30), false));
+		state.join();
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+		active.store(true, std::memory_order_relaxed);
+	}
+	// A refused pull: any wake ends it, ready or not
+	{
+		std::thread other([&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			wake.Notify();
+		});
+		const auto start = clock::now();
+		CHECK(!wake.WaitUntil([] { return false; }, start + std::chrono::seconds(30), true));
+		other.join();
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+	}
+}
+
 int main()
 {
 	TestWorkQueueStream();
@@ -469,6 +534,7 @@ int main()
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();
+	TestAudioFeedWait();
 	if (s_failures)
 	{
 		std::fprintf(stderr, "%d check(s) failed\n", s_failures);

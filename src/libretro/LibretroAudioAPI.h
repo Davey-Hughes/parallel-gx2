@@ -4,6 +4,7 @@
 #include "libretro/LibretroAudioRing.h"
 
 #include <atomic>
+#include <chrono>
 
 class LibretroAudioAPI : public IAudioAPI
 {
@@ -53,6 +54,15 @@ public:
 	static size_t PullAudio(size_t maxFrames);
 	// Drops what is buffered (after a pause, so it is not played late)
 	static void DropBuffered();
+	// RetroArch's audio thread, after a PullAudio that gave nothing: waits
+	// for FeedBlock to put something in the ring, for WakeFeedWaiter, for
+	// `active` to go false, or for the bound, whichever is first. A pull the
+	// frontend refused waits the bound out (or a wake): a fuller ring is no
+	// answer to a full device. No lock: an eventcount FeedBlock notifies.
+	static void WaitForFeed(bool refused, const std::atomic_bool& active, std::chrono::microseconds bound);
+	static void WakeFeedWaiter();
+	// Whether the last PullAudio had samples that the frontend refused
+	static bool LastPullRefused() { return s_last_pull_refused; }
 
 	static void Reset();
 
@@ -75,6 +85,7 @@ private:
 	static unsigned s_out_channels;
 	static LibretroAudioRingBuffer s_ring_buffer;
 	static std::atomic_bool s_thread_mode;
+	static bool s_last_pull_refused; // RetroArch's audio thread only
 
 	static bool s_log_stats;
 	static uint64_t s_stat_offered;

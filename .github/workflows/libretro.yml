@@ -88,7 +88,8 @@ jobs:
         # an idle GPU thread sleeps until the CPU submits; the GPU thread's
         # start, the title start, the graphic packs, the GPU's init, GX2Init
         # and the IOSU services' threads sleep until notified, not by the
-        # clock; nor is the pause gate a mutex any more
+        # clock; nor is the pause gate a mutex any more; context_destroy's
+        # waits for the GPU thread and the Audio Thread's empty pulls too
         run: ./tools/check_gpu_waits.sh
 
       - name: "curl_compat against local servers"

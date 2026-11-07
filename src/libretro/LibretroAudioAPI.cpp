@@ -28,6 +28,14 @@ LibretroAudioRingBuffer LibretroAudioAPI::s_ring_buffer;
 std::atomic_bool LibretroAudioAPI::s_thread_mode{false};
 LibretroAudioAPI::MultiAudioCallback LibretroAudioAPI::s_multi_callback = nullptr;
 unsigned LibretroAudioAPI::s_out_channels = 2;
+bool LibretroAudioAPI::s_last_pull_refused = false;
+
+// What RetroArch's audio thread sleeps on between pulls that found nothing
+static LibretroAudioFeedWake& GetFeedWake()
+{
+	static LibretroAudioFeedWake s_wake;
+	return s_wake;
+}
 
 LibretroAudioAPI::LibretroAudioAPI(uint32 samplerate, uint32 channels, uint32 samples_per_block, uint32 bits_per_sample)
 	: IAudioAPI(samplerate, channels, samples_per_block, bits_per_sample)
@@ -105,6 +113,8 @@ bool LibretroAudioAPI::FeedBlock(sint16* data)
 		}
 	}
 	AccountWrite(sampleCount, written);
+	if (written > 0 && s_thread_mode.load(std::memory_order_relaxed))
+		GetFeedWake().Notify(); // WaitForFeed
 	return written > 0;
 }
 
@@ -233,6 +243,7 @@ size_t LibretroAudioAPI::PullAudio(size_t maxFrames)
 	const size_t samplesRead = SendFromRing(wanted, samplesSent);
 	if (samplesRead)
 		AccountFlush(samplesRead, samplesSent);
+	s_last_pull_refused = samplesRead != 0 && samplesSent == 0;
 	const size_t framesSent = samplesSent / channels;
 	return framesSent;
 }
@@ -240,6 +251,21 @@ size_t LibretroAudioAPI::PullAudio(size_t maxFrames)
 void LibretroAudioAPI::DropBuffered()
 {
 	s_ring_buffer.Discard(s_ring_buffer.GetReadAvailableSamples());
+}
+
+void LibretroAudioAPI::WaitForFeed(bool refused, const std::atomic_bool& active, std::chrono::microseconds bound)
+{
+	// A refused pull ends at the first wake: that is the stop, or more audio
+	// the frontend is as likely to refuse - it asks again either way
+	GetFeedWake().WaitUntil([&] {
+		return !active.load(std::memory_order_relaxed) ||
+			(!refused && s_ring_buffer.GetReadAvailableSamples() != 0);
+	}, std::chrono::steady_clock::now() + bound, refused);
+}
+
+void LibretroAudioAPI::WakeFeedWaiter()
+{
+	GetFeedWake().Notify();
 }
 
 void LibretroAudioAPI::SetStatsLogging(bool enabled)
