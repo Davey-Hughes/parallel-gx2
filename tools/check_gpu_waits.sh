@@ -28,7 +28,10 @@
 # audio devices every 3 ms (AudioDevicesGate.h); and the two the emulated CPU
 # hits hardest, both spinlocks before: every guest time read on every core
 # (PPCTimerClock.h) and every data cache flush it reports to the GPU, down to
-# each dcbf/dcbst (AtomicPageSet.h).
+# each dcbf/dcbst (AtomicPageSet.h); the Vulkan renderer's destruction queue
+# and the pipelines each shader and framebuffer is used by, which the pipeline
+# cache's compile threads all register at once while a title loads
+# (AtomicPtrBag.h).
 #
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
@@ -117,9 +120,19 @@ for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
 	src/audio/AudioDevicesGate.h src/audio/IAudioAPI.h src/audio/IAudioAPI.cpp \
 	src/Cafe/OS/libs/snd_core/ax_out.cpp \
 	src/Cafe/HW/Espresso/PPCTimer.cpp src/Cafe/HW/Espresso/PPCTimerClock.h \
-	src/Cafe/HW/Latte/Core/LatteBufferCache.cpp src/util/helpers/AtomicPageSet.h; do
+	src/Cafe/HW/Latte/Core/LatteBufferCache.cpp src/util/helpers/AtomicPageSet.h \
+	src/Cafe/HW/Latte/Renderer/Vulkan/CachedFBOVk.h src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.h \
+	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.cpp \
+	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h src/util/helpers/AtomicPtrBag.h; do
 	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for|FSpinlock'; then
 		echo "$f: takes a lock or sleeps again"; fail=1
+	fi
+done
+# VulkanRenderer still has a reader-writer lock around vkCreateGraphicsPipelines
+# for the cache saver, so only the spinlock is checked for there
+for f in src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp; do
+	if pp $f | grep -q 'FSpinlock\|m_spinlockDestructionQueue'; then
+		echo "$f: the destruction queue takes a lock again"; fail=1
 	fi
 done
 if pp src/libretro/CemuLibretro.cpp | grep -qE 's_motion_mutex|s_vpad_rumble_mutex'; then

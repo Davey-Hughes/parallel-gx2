@@ -5,7 +5,7 @@
 
 #include <vulkan/vulkan_core.h>
 #include "util/helpers/Semaphore.h"
-#include "util/helpers/fspinlock.h"
+#include "util/helpers/AtomicPtrBag.h"
 
 class RendererShaderVk : public RendererShader
 {
@@ -33,20 +33,17 @@ public:
 
 	VkShaderModule& GetShaderModule() { return m_shader_module; }
 
-	static inline FSpinlock s_dependencyLock;
-
+	// The pipelines using this shader, which the pipeline cache's compile
+	// threads register concurrently while a title loads: no lock (one spinlock
+	// for every shader before), AtomicPtrBag.h
 	void TrackDependency(class PipelineInfo* p)
 	{
-		s_dependencyLock.lock();
-		list_pipelineInfo.emplace_back(p);
-		s_dependencyLock.unlock();
+		list_pipelineInfo.Add(p);
 	}
 
 	void RemoveDependency(class PipelineInfo* p)
 	{
-		s_dependencyLock.lock();
-		vectorRemoveByValue(list_pipelineInfo, p);
-		s_dependencyLock.unlock();
+		list_pipelineInfo.Remove(p);
 	}
 
 	void PreponeCompilation(bool isRenderThread) override;
@@ -67,5 +64,5 @@ private:
 	void CreateVkShaderModule(std::span<uint32> spirvBuffer);
 
 	// pipeline infos
-	std::vector<class PipelineInfo*> list_pipelineInfo;
+	AtomicPtrBag<class PipelineInfo> list_pipelineInfo;
 };

@@ -11,6 +11,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.h"
 #include "util/math/vector2.h"
 #include "util/helpers/Semaphore.h"
+#include "util/helpers/MpscList.h"
 #include "util/containers/flat_hash_map.hpp"
 #include "util/containers/robin_hood.h"
 
@@ -246,8 +247,13 @@ public:
 	void ReleaseDestructibleObject(VKRDestructibleObject* destructibleObject);
 	void ProcessDestructionQueue();
 
-	FSpinlock m_spinlockDestructionQueue;
+	// Released from the GPU thread and the pipeline compile threads, through
+	// an MpscList; ProcessDestructionQueue (the GPU thread) takes them into
+	// the vector, which is its alone. No lock either side - a spinlock both
+	// took before. The count is for the overlay.
+	MpscList<VKRDestructibleObject*> m_destructionRequests;
 	std::vector<VKRDestructibleObject*> m_destructionQueue;
+	std::atomic<uint32> m_destructionQueueSize{0};
 
 	void PipelineCacheSaveThread(size_t cache_size);
 	// Stops the thread above without needing the device. The destructor does

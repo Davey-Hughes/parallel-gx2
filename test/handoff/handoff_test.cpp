@@ -37,6 +37,11 @@
 //    or across them, runs at the console's clock over the TSC's rate times
 //    the shift, and moves no time already counted when the rate is refined
 //    or the shift changes under readers;
+//  - AtomicPtrBag (the pipelines a shader or framebuffer is used by): compile
+//    threads registering and dropping pipelines on shared shaders at once
+//    lose none and keep none they dropped, and an owner's destruction hands
+//    each remaining one over once, even as their destructors remove them
+//    from it and from the other bags;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -54,6 +59,7 @@
 #include "libretro/LibretroVkQueue.h"
 #include "audio/AudioDevicesGate.h"
 #include "util/helpers/AtomicPageSet.h"
+#include "util/helpers/AtomicPtrBag.h"
 #include "Cafe/HW/Espresso/PPCTimerClock.h"
 #include <set>
 #include "libretro.h"
@@ -858,6 +864,79 @@ static void TestPPCTimerClock()
 	CHECK(!bad.load());
 }
 
+// --- pipeline dependency bags ---------------------------------------------
+
+struct FakePipeline;
+static AtomicPtrBag<FakePipeline>* s_fakeShaders[3];
+static std::atomic<int> s_fakePipelinesAlive{0};
+
+struct FakePipeline
+{
+	FakePipeline()
+	{
+		s_fakePipelinesAlive.fetch_add(1);
+		for (auto* shader : s_fakeShaders)
+			shader->Add(this);
+	}
+	~FakePipeline()
+	{
+		for (auto* shader : s_fakeShaders)
+			shader->Remove(this);
+		s_fakePipelinesAlive.fetch_sub(1);
+	}
+};
+
+static void TestAtomicPtrBag()
+{
+	for (auto*& shader : s_fakeShaders)
+		shader = new AtomicPtrBag<FakePipeline>();
+	// Compile threads loading the cache: build a pipeline, keep some, drop
+	// the rest, all on the same three shaders
+	std::vector<std::vector<FakePipeline*>> kept(6);
+	std::vector<std::thread> compilers;
+	for (int t = 0; t < 6; t++)
+		compilers.emplace_back([&, t] {
+			for (int i = 0; i < 3000; i++)
+			{
+				FakePipeline* p = new FakePipeline();
+				if (i % 3 == 0)
+					kept[t].push_back(p);
+				else
+					delete p;
+			}
+		});
+	for (auto& t : compilers)
+		t.join();
+	size_t keptCount = 0;
+	for (auto& k : kept)
+		keptCount += k.size();
+	CHECK(s_fakePipelinesAlive.load() == (int)keptCount);
+	// Each bag holds exactly the kept ones
+	for (auto* shader : s_fakeShaders)
+	{
+		size_t n = 0;
+		// counted by taking and putting back, on one thread
+		std::vector<FakePipeline*> seen;
+		shader->ForEachTaken([&](FakePipeline* p) { seen.push_back(p); n++; });
+		for (auto* p : seen)
+			shader->Add(p);
+		CHECK(n == keptCount);
+	}
+	// The first shader goes: it deletes every pipeline still using it, each
+	// of which takes itself out of all three as it goes
+	int deleted = 0;
+	s_fakeShaders[0]->ForEachTaken([&](FakePipeline* p) { delete p; deleted++; });
+	CHECK(deleted == (int)keptCount);
+	CHECK(s_fakePipelinesAlive.load() == 0);
+	for (auto* shader : s_fakeShaders)
+		CHECK(shader->Empty());
+	for (auto*& shader : s_fakeShaders)
+	{
+		delete shader;
+		shader = nullptr;
+	}
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -1075,6 +1154,7 @@ int main()
 	TestAudioDevicesGate();
 	TestAtomicPageSet();
 	TestPPCTimerClock();
+	TestAtomicPtrBag();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

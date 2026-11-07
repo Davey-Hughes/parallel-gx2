@@ -100,8 +100,7 @@ RendererShaderVk::RendererShaderVk(ShaderType type, uint64 baseHash, uint64 auxH
 
 RendererShaderVk::~RendererShaderVk()
 {
-	while (!list_pipelineInfo.empty())
-		delete list_pipelineInfo[0];
+	list_pipelineInfo.ForEachTaken([](PipelineInfo* p) { delete p; });
 
 	VkDevice vkDev = VulkanRenderer::GetInstance()->GetLogicalDevice();
 	vkDestroyShaderModule(vkDev, m_shader_module, nullptr);

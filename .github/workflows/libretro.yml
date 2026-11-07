@@ -93,7 +93,8 @@ jobs:
         # the title scan, IOSU shutdown, SpotPass and nim waits as well;
         # and log.txt, the Vulkan queue lock and the motion and rumble
         # handoffs take no lock, nor AX's use of the audio devices, guest
-        # time reads or the CPU's data cache flush reports
+        # time reads, the CPU's data cache flush reports, or the Vulkan
+        # pipeline cache's compile threads
         run: ./tools/check_gpu_waits.sh
 
       - name: "curl_compat against local servers"

@@ -41,8 +41,7 @@ void CachedFBOVk::CreateRenderPass()
 
 CachedFBOVk::~CachedFBOVk()
 {
-	while (!m_usedByPipelines.empty())
-		delete m_usedByPipelines[0];
+	m_usedByPipelines.ForEachTaken([](PipelineInfo* p) { delete p; });
 	auto vkr = VulkanRenderer::GetInstance();
 	vkr->ReleaseDestructibleObject(m_vkrObjFramebuffer);
 	m_vkrObjFramebuffer = nullptr;

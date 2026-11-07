@@ -190,9 +190,8 @@ void VulkanPipelineStableCache::Close()
 	// Every hash in here names a pipeline built against the device that is
 	// going away. Kept across titles, the next one believes its pipelines are
 	// already accounted for and never writes them again.
-	m_pipelineIsCachedLock.lock();
+	TakeLoadedHashes();
 	m_pipelineIsCached.clear();
-	m_pipelineIsCachedLock.unlock();
 	// The cache file is deliberately not freed here: retro_unload_game does it
 	// once the GPU thread is gone (ReleaseCacheFile), or else BeginLoading for
 	// the next title. See the note there.
@@ -302,22 +301,16 @@ VKRObjectRenderPass* __CreateTemporaryRenderPass(const LatteDecompilerShader* pi
 
 void VulkanPipelineStableCache::LoadPipelineFromCache(std::span<uint8> fileData)
 {
-	static FSpinlock s_spinlockSharedInternal;
-
 	// deserialize file
 	LatteContextRegister* lcr = new LatteContextRegister();
-	s_spinlockSharedInternal.lock();
 	CachedPipeline* cachedPipeline = new CachedPipeline();
-	s_spinlockSharedInternal.unlock();
 
 	MemStreamReader streamReader(fileData.data(), fileData.size());
 	if (!DeserializePipeline(streamReader, *cachedPipeline))
 	{
 		// failed to deserialize
-		s_spinlockSharedInternal.lock();
 		delete lcr;
 		delete cachedPipeline;
-		s_spinlockSharedInternal.unlock();
 		return;
 	}
 	// restored register view from compacted state
@@ -364,19 +357,17 @@ void VulkanPipelineStableCache::LoadPipelineFromCache(std::span<uint8> fileData)
 	}
 	auto renderPass = __CreateTemporaryRenderPass(pixelShader, *lcr);
 	// create pipeline info
-	m_pipelineIsCachedLock.lock();
+	// No lock: what it shares with the other compile threads is the shaders'
+	// lists of the pipelines using them, which are lock-free (AtomicPtrBag.h)
 	PipelineInfo* pipelineInfo = new PipelineInfo(0, 0, vertexShader->compatibleFetchShader, vertexShader, pixelShader, geometryShader);
-	m_pipelineIsCachedLock.unlock();
 	// compile
 	{
 		PipelineCompiler pipelineCompiler;
 		bool requiresRobustBufferAccess = PipelineCompiler::CalcRobustBufferAccessRequirement(vertexShader, pixelShader, geometryShader);
 		if (!pipelineCompiler.InitFromCurrentGPUState(pipelineInfo, *lcr, renderPass, requiresRobustBufferAccess))
 		{
-			s_spinlockSharedInternal.lock();
 			delete lcr;
 			delete cachedPipeline;
-			s_spinlockSharedInternal.unlock();
 			return;
 		}
 		pipelineCompiler.Compile(true, true, false);
@@ -384,20 +375,25 @@ void VulkanPipelineStableCache::LoadPipelineFromCache(std::span<uint8> fileData)
 	// on success, calculate pipeline hash and flag as present in cache
 	uint64 pipelineBaseHash = vertexShader->baseHash;
 	uint64 pipelineStateHash = VulkanRenderer::draw_calculateGraphicsPipelineHash(vertexShader->compatibleFetchShader, vertexShader, geometryShader, pixelShader, renderPass, *lcr);
-	m_pipelineIsCachedLock.lock();
-	m_pipelineIsCached.emplace(pipelineBaseHash, pipelineStateHash);
-	m_pipelineIsCachedLock.unlock();
+	// for the GPU thread to take into m_pipelineIsCached (TakeLoadedHashes)
+	m_pipelinesLoaded.Push(PipelineHash(pipelineBaseHash, pipelineStateHash));
 	// clean up
-	s_spinlockSharedInternal.lock();
 	delete pipelineInfo;
 	delete lcr;
 	delete cachedPipeline;
 	VulkanRenderer::GetInstance()->ReleaseDestructibleObject(renderPass);
-	s_spinlockSharedInternal.unlock();
+}
+
+// The set is the GPU thread's alone; the compile threads loading the cache
+// hand it what they loaded through an MpscList instead of a lock on it
+void VulkanPipelineStableCache::TakeLoadedHashes()
+{
+	m_pipelinesLoaded.TakeAll([this](PipelineHash&& hash) { m_pipelineIsCached.emplace(hash); });
 }
 
 bool VulkanPipelineStableCache::HasPipelineCached(uint64 baseHash, uint64 pipelineStateHash)
 {
+	TakeLoadedHashes();
 	PipelineHash ph(baseHash, pipelineStateHash);
 	return m_pipelineIsCached.find(ph) != m_pipelineIsCached.end();
 }

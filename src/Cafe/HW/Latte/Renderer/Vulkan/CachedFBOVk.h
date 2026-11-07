@@ -2,6 +2,7 @@
 
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRBase.h"
+#include "util/helpers/AtomicPtrBag.h"
 
 class CachedFBOVk : public LatteCachedFBO
 {
@@ -15,8 +16,6 @@ public:
 	}
 
 	~CachedFBOVk();
-
-	static inline FSpinlock s_spinlockDependency;
 
 	VKRObjectFramebuffer* GetFramebufferObj() const
 	{
@@ -35,18 +34,16 @@ public:
 	}
 
 
+	// Registered from the pipeline cache's compile threads as well as the GPU
+	// thread: no lock, AtomicPtrBag.h
 	void TrackDependency(class PipelineInfo* pipelineInfo)
 	{
-		s_spinlockDependency.lock();
-		m_usedByPipelines.emplace_back(pipelineInfo);
-		s_spinlockDependency.unlock();
+		m_usedByPipelines.Add(pipelineInfo);
 	}
 
 	void RemoveDependency(class PipelineInfo* pipelineInfo)
 	{
-		s_spinlockDependency.lock();
-		vectorRemoveByValue(m_usedByPipelines, pipelineInfo);
-		s_spinlockDependency.unlock();
+		m_usedByPipelines.Remove(pipelineInfo);
 	}
 
 	[[nodiscard]] const VkExtent2D& GetExtend() const { return m_extend;}
@@ -97,5 +94,5 @@ private:
 	VkRenderingAttachmentInfoKHR m_vkDepthAttachment;
 	VkRenderingAttachmentInfoKHR m_vkStencilAttachment;
 
-	std::vector<class PipelineInfo*> m_usedByPipelines; // PipelineInfo objects which use this renderpass/framebuffer
+	AtomicPtrBag<class PipelineInfo> m_usedByPipelines; // PipelineInfo objects which use this renderpass/framebuffer
 };

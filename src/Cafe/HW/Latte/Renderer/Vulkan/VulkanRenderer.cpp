@@ -677,7 +677,7 @@ VulkanRenderer::~VulkanRenderer()
 		vkDestroyDebugUtilsMessengerEXT(m_instance, m_debugCallback, nullptr);
 	}
 
-	while(!m_destructionQueue.empty())
+	while (m_destructionQueueSize.load(std::memory_order_relaxed) != 0)
 		ProcessDestructionQueue();
 
 	// destroy memory manager
@@ -2874,25 +2874,24 @@ void VulkanRenderer::ReleaseDestructibleObject(VKRDestructibleObject* destructib
 		return;
 	}
 	// otherwise put on queue
-	m_spinlockDestructionQueue.lock();
-	m_destructionQueue.emplace_back(destructibleObject);
-	m_spinlockDestructionQueue.unlock();
+	m_destructionQueueSize.fetch_add(1, std::memory_order_relaxed);
+	m_destructionRequests.Push(destructibleObject);
 }
 
 void VulkanRenderer::ProcessDestructionQueue()
 {
-	m_spinlockDestructionQueue.lock();
+	m_destructionRequests.TakeAll([this](VKRDestructibleObject*&& obj) { m_destructionQueue.emplace_back(obj); });
 	for (auto it = m_destructionQueue.begin(); it != m_destructionQueue.end();)
 	{
 		if ((*it)->canDestroy())
 		{
 			delete (*it);
 			it = m_destructionQueue.erase(it);
+			m_destructionQueueSize.fetch_sub(1, std::memory_order_relaxed);
 			continue;
 		}
 		++it;
 	}
-	m_spinlockDestructionQueue.unlock();
 }
 
 VkDescriptorSetInfo::~VkDescriptorSetInfo()
@@ -3421,9 +3420,7 @@ void VulkanRenderer::AppendOverlayDebugInfo()
 	ImGui::Text("ImageSampler   %u", performanceMonitor.vk.numSamplers.get());
 	ImGui::Text("RenderPass     %u", performanceMonitor.vk.numRenderPass.get());
 	ImGui::Text("Framebuffer    %u", performanceMonitor.vk.numFramebuffer.get());
-	m_spinlockDestructionQueue.lock();
-	ImGui::Text("DestructionQ   %u", (unsigned int)m_destructionQueue.size());
-	m_spinlockDestructionQueue.unlock();
+	ImGui::Text("DestructionQ   %u", (unsigned int)m_destructionQueueSize.load(std::memory_order_relaxed));
 
 
 	ImGui::Text("BeginRP/f      %u", performanceMonitor.vk.numBeginRenderpassPerFrame.get());

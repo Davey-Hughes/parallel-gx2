@@ -1,5 +1,5 @@
 #pragma once
-#include "util/helpers/fspinlock.h"
+#include "util/helpers/MpscList.h"
 
 struct VulkanPipelineHash
 {
@@ -70,7 +70,8 @@ private:
 	std::atomic_bool m_stopCacheStoreThread{ false };
 
 	std::unordered_set<PipelineHash, PipelineHash::HashFunc> m_pipelineIsCached;
-	FSpinlock m_pipelineIsCachedLock;
+	MpscList<PipelineHash> m_pipelinesLoaded; // from the compile threads, see TakeLoadedHashes
+	void TakeLoadedHashes();
 	class FileCache* s_cache;
 
 	std::atomic_uint32_t m_numCompilationThreads{ 0 };
