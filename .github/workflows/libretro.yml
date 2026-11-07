@@ -3,8 +3,9 @@ name: Build libretro core
 # Builds parallel_gx2_libretro with the Makefile for every target the core
 # currently supports and uploads each result as an artifact, so a release
 # can be assembled from them. The dependencies are submodules built with
-# the core, so a job installs no libraries beyond the system's GL and X11
-# headers on Linux. Also runs the network layer's tests.
+# the core, so a job installs no libraries beyond the system's X11 headers
+# on Linux (Vulkan's surface declarations). Also runs the network layer's
+# and the OpenGL GPU cothread's tests.
 
 on:
   push:
@@ -45,14 +46,18 @@ jobs:
           fetch-depth: 0
 
       - name: "Install dependencies"
-        # the headers the OpenGL and Vulkan surfaces are declared with
+        # the headers Vulkan's X11 surfaces are declared with
         run: |
           sudo apt update -qq
           sudo apt install -y --no-install-recommends g++-12 \
-            libgl-dev libegl-dev libx11-dev libxrender-dev libx11-xcb-dev
+            libx11-dev libxrender-dev libx11-xcb-dev
 
       - name: "Build"
         run: make -j $(nproc) CC=gcc-12 CXX=g++-12
+
+      - name: "No GL, EGL or X11 linked"
+        # the context and every GL function are the frontend's
+        run: ./tools/check_core_imports.sh parallel_gx2_libretro.so
 
       - name: "Upload artifact"
         uses: actions/upload-artifact@v6
@@ -77,6 +82,14 @@ jobs:
           SANITIZER=address,undefined ./dependencies/curl-compat/test/run_tests.sh
           make -C dependencies/curl-compat/test clean
           SANITIZER=thread ./dependencies/curl-compat/test/run_tests.sh
+
+      - name: "OpenGL GPU cothread"
+        # plain, then under AddressSanitizer + UBSan (ThreadSanitizer does
+        # not follow stack switches)
+        run: |
+          ./test/gpu_cothread/run_tests.sh
+          make -C test/gpu_cothread clean
+          SANITIZER=address,undefined ./test/gpu_cothread/run_tests.sh
 
   macos:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'macos')

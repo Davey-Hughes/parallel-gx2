@@ -458,7 +458,15 @@ void cemu_initForGame()
 	// everything initialized
 	cemuLog_log(LogType::Force, "------- Run title -------");
 	// wait till GPU thread is initialized
-	while (g_isGPUInitFinished == false) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	// Under OpenGL the GPU is a cothread of this thread (LatteGpuCothread.h),
+	// and getting its init done is this thread running it.
+	while (g_isGPUInitFinished == false)
+	{
+		if (Latte_IsGpuCothread())
+			Latte_ServeGpu();
+		else
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	}
 	// run coreinit rpl_entry
 	RPLLoader_CallCoreinitEntrypoint();
 	// init AX and start AX I/O thread

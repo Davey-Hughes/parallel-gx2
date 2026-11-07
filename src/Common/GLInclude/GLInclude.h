@@ -2,54 +2,11 @@
 
 #include "glext.h"
 
-#if BOOST_OS_WINDOWS > 0
-#include "wglext.h"
-#endif
-
-#if ( BOOST_OS_LINUX || BOOST_OS_BSD ) > 0
-
-#define EGL_EGL_PROTOTYPES 0
-#include "egl.h"
-#undef EGL_EGL_PROTOTYPES
-
-// Android and webOS are BOOST_OS_LINUX as well, but have no X11 and therefore
-// no GLX - the function loader goes through EGL there.
-#if !defined(__ANDROID__) && !defined(WEBOS)
-
-// from Xlib
-#define Bool int
-#define Status int
-#define True 1
-#define False 0
-
-// from system glx.h
-typedef XID GLXContextID;
-typedef XID GLXPixmap;
-typedef XID GLXDrawable;
-typedef XID GLXPbuffer;
-typedef XID GLXWindow;
-typedef XID GLXFBConfigID;
-typedef struct __GLXcontextRec *GLXContext;
-typedef struct __GLXFBConfigRec *GLXFBConfig;
-
-#include "glxext.h"
-
-#undef Bool
-#undef Status
-#undef True
-#undef False
-
-#endif // !__ANDROID__ && !WEBOS
-
-#endif
-
 namespace CemuGL
 {
 #define GLFUNC(__type, __name)	extern __type __name;
-#define EGLFUNC(__type, __name) extern __type __name;
 #include "glFunctions.h"
 #undef GLFUNC
-#undef EGLFUNC
 
 // DSA-style helpers with fallback to legacy API if DSA is not supported
 

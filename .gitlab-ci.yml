@@ -62,9 +62,9 @@ stages:
 ##############################################################################
 #
 ################################### DESKTOPS #################################
-# Linux wants the GLX, EGL, X11 and XCB headers the core's OpenGL and
-# Vulkan surfaces are declared with; a job defining before_script replaces
-# the template's, so its one line is repeated here.
+# Linux wants the X11 and XCB headers Vulkan's surfaces are declared with
+# (OpenGL needs none: the context is the frontend's); a job defining
+# before_script replaces the template's, so its one line is repeated here.
 .core-defs-linux:
   extends: .core-defs
   variables:
@@ -75,7 +75,7 @@ stages:
     - export NUMPROC=$(($(nproc)/5))
     - apt-get update -qq
     - apt-get install -y --no-install-recommends
-      libgl-dev libegl-dev libx11-dev libxrender-dev libx11-xcb-dev
+      libx11-dev libxrender-dev libx11-xcb-dev
 
 # Windows 64-bit
 libretro-build-windows-x64:
@@ -171,3 +171,19 @@ test-curl-compat:
     - SANITIZER=address,undefined ./dependencies/curl-compat/test/run_tests.sh
     - make -C dependencies/curl-compat/test clean
     - SANITIZER=thread ./dependencies/curl-compat/test/run_tests.sh
+
+# The OpenGL GPU as a cothread of the frontend's thread (LatteGpuCothread.h):
+# the run/yield protocol, exit and restart, and libco on several threads at
+# once. ThreadSanitizer does not follow stack switches, so not under it.
+test-gpu-cothread:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+    CC: gcc-12
+    CXX: g++-12
+  script:
+    - ./test/gpu_cothread/run_tests.sh
+    - make -C test/gpu_cothread clean
+    - SANITIZER=address,undefined ./test/gpu_cothread/run_tests.sh

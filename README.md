@@ -15,11 +15,12 @@ Build it yourself for anything else, or to test a change.
 A static Makefile builds the core and everything it uses: the libraries are
 submodules built with it, and the network layer is libretro-common's (HTTP
 and TLS, with no libcurl, OpenSSL or mbedTLS), so nothing but a C++20
-compiler and, on Linux, the system's GL and X11 headers is needed.
+compiler and, on Linux, the system's X11 headers (for Vulkan's surface
+declarations) is needed.
 
 ```bash
-# Ubuntu/Debian: the headers the OpenGL and Vulkan surfaces are declared with
-sudo apt install -y g++ make libgl-dev libegl-dev libx11-dev libxrender-dev libx11-xcb-dev
+# Ubuntu/Debian: the headers Vulkan's X11 surfaces are declared with
+sudo apt install -y g++ make libx11-dev libxrender-dev libx11-xcb-dev
 
 # Clone with submodules - the libraries and the community graphic packs live
 # in them. On an existing clone: git submodule update --init --recursive
@@ -83,13 +84,12 @@ Known issues:
 - **Some games crash or misrender**, as in standalone Cemu, and some only in the core. Reports with `log.txt` and the RetroArch log are welcome on the issue tracker.
 - **No save states.** Cemu cannot serialize its state, so `retro_serialize_size` returns 0.
 - **The core stays loaded between games.** RetroArch unloads it, but the library itself stays in memory (on Linux on purpose, see `-z nodelete` below). Any state Cemu keeps for the whole process can leak from one game into the next. The known cases (DLC list, graphic pack module list, controller callbacks) are fixed.
-- **OpenGL on Wayland renders black.** Use Vulkan there; OpenGL works on X11 (GLX).
 
 Planned: output above 60 fps for games with high frame rate packs. The Cheats graphic packs have their own category, and games, updates and DLC are installed from the core options (Title Manager).
 
 ## Architecture
 
-- Vulkan renders on the frontend's device (`RETRO_HW_CONTEXT_VULKAN` with the context negotiation interface) and hands RetroArch each finished image. OpenGL uses a 4.5 Core Profile HW context, plus a shared context for Cemu's GPU thread (GLX on X11, EGL elsewhere).
+- Vulkan renders on the frontend's device (`RETRO_HW_CONTEXT_VULKAN` with the context negotiation interface) and hands RetroArch each finished image. OpenGL uses a 4.5 Core Profile HW context of the core's own (`RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT`) and nothing else: no WGL, GLX, EGL or CGL, and no GL library linked. Every GL function comes from the frontend's `get_proc_address`, and since the context is current only on the frontend's thread during the core's callbacks, Cemu's GPU thread runs there as a libco cothread (`LatteGpuCothread.h`): `retro_run` runs it until it finishes a frame, and wherever it would wait for the emulated CPU it hands the frontend's thread back. The frame is blitted from the backbuffer into the frontend's framebuffer on that same context, with no readback.
 - The Vulkan device belongs to the frontend, so the core asks it for the extensions and features standalone Cemu enables, and the renderer then uses only what was actually enabled. An extension the GPU advertises is not necessarily enabled on a device RetroArch created, and `vkGetDeviceProcAddr` then returns null.
 - `cache_context = true` keeps the Vulkan context across fullscreen toggles and video driver reinits, the present path asks the frontend for its render interface every frame, and the GPU thread parks at a command boundary while the frontend rebuilds its driver.
 - Audio goes through `LibretroAudioAPI`, a lock-free ring buffer paced by the frames the frontend asks for.

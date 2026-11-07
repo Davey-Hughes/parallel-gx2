@@ -47,3 +47,6 @@ dependencies/vcpkg_overlay_ports_win
 dependencies/vcpkg_triplets
 src/Cemu/Tools/DownloadManager
 src/util/helpers/ZipArchive.h
+src/Common/GLInclude/egl.h
+src/Common/GLInclude/glxext.h
+src/Common/GLInclude/wglext.h

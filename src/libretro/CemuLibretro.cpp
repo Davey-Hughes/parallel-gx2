@@ -90,217 +90,17 @@
 #include "LibretroVkQueue.h"
 #include "libretro_core_options.h"
 
-// GL function needed for framebuffer readback (glBindFramebuffer is in Cemu's glext.h).
-// Through the frontend's GL like the rest, not by name: the core links no libGL.
-#ifdef ENABLE_OPENGL
-static void* cemu_gl_get_proc(const char* name);
-static void lr_glReadPixels(int x, int y, int width, int height, unsigned int format, unsigned int type, void* pixels)
-{
-	static const auto f = (void (*)(int, int, int, int, unsigned int, unsigned int, void*))cemu_gl_get_proc("glReadPixels");
-	if (f)
-		f(x, y, width, height, format, type, pixels);
-}
-#endif
-#ifndef GL_BGRA
-#define GL_BGRA 0x80E1
-#endif
-#ifndef GL_READ_FRAMEBUFFER
-#define GL_READ_FRAMEBUFFER 0x8CA8
-#endif
-
 #include <mutex>
 #include "input/motion/MotionHandler.h"
 #include <condition_variable>
 #include <atomic>
 
-// Shared context creation. Linux takes the frontend's GLX (X11) or EGL (Wayland)
-// context; Windows takes its WGL one. Everything platform specific in this file
-// sits behind _WIN32 from here on.
-#ifdef _WIN32
-
-#include <windows.h>
-
-// RetroArch's context, and the one we create for Cemu's GPU thread to share with.
-static HDC s_wgl_frontend_dc = nullptr;
-static HGLRC s_wgl_frontend_context = nullptr;
-static HGLRC s_wgl_shared_context = nullptr;
-
-#else
-
-// Everything from here to the end of this block talks to GLX or EGL. macOS has
-// neither — Cemu's CMake defaults ENABLE_OPENGL to OFF there and builds Metal and
-// Vulkan instead — so the GL context glue follows the same switch as the backend
-// it exists for. The Vulkan handoff further down is untouched by this.
+// GL entry points come from the frontend, which owns the context. No wgl, glX,
+// egl or CGL anywhere in the core: making a context current, sharing one,
+// swapping - all of that is the frontend's (libretro's HW render interface).
 #ifdef ENABLE_OPENGL
-
-#ifndef __ANDROID__
-// X11 Bool conflicts with Cemu enums, so we define it before including GLX
-#ifndef Bool
-#define Bool int
-#define CEMU_DEFINED_BOOL
+static void* cemu_gl_get_proc(const char* name);
 #endif
-#include <X11/Xlib.h>
-#include <GL/glx.h>
-#ifdef CEMU_DEFINED_BOOL
-#undef Bool
-#endif
-#endif // __ANDROID__
-#include <dlfcn.h>
-
-#ifndef __ANDROID__
-// GLX and Xlib are not linked into the core: with libGL and libX11 among its
-// libraries it would not load on a system without X11, and the frontend owns
-// the window anyway. When the frontend's context is a GLX one, its libGL and
-// libX11 are in the process, and their functions are found at run time; when
-// they are not found there is no GLX context to share, which is what these
-// answer.
-template<typename F>
-static F lr_x11_symbol(const char* name)
-{
-	return (F)dlsym(RTLD_DEFAULT, name);
-}
-static __GLXextFuncPtr lr_glXGetProcAddress(const GLubyte* name)
-{
-	static auto f = lr_x11_symbol<__GLXextFuncPtr (*)(const GLubyte*)>("glXGetProcAddress");
-	return f ? f(name) : nullptr;
-}
-static int lr_glXMakeCurrent(Display* display, GLXDrawable drawable, GLXContext context)
-{
-	static auto f = lr_x11_symbol<int (*)(Display*, GLXDrawable, GLXContext)>("glXMakeCurrent");
-	return f ? f(display, drawable, context) : 0;
-}
-static GLXContext lr_glXGetCurrentContext()
-{
-	static auto f = lr_x11_symbol<GLXContext (*)()>("glXGetCurrentContext");
-	return f ? f() : nullptr;
-}
-static Display* lr_glXGetCurrentDisplay()
-{
-	static auto f = lr_x11_symbol<Display* (*)()>("glXGetCurrentDisplay");
-	return f ? f() : nullptr;
-}
-static GLXDrawable lr_glXGetCurrentDrawable()
-{
-	static auto f = lr_x11_symbol<GLXDrawable (*)()>("glXGetCurrentDrawable");
-	return f ? f() : 0;
-}
-static int lr_glXQueryContext(Display* display, GLXContext context, int attribute, int* value)
-{
-	static auto f = lr_x11_symbol<int (*)(Display*, GLXContext, int, int*)>("glXQueryContext");
-	return f ? f(display, context, attribute, value) : 1 /* GLX_BAD_SCREEN: not Success */;
-}
-static GLXFBConfig* lr_glXGetFBConfigs(Display* display, int screen, int* count)
-{
-	static auto f = lr_x11_symbol<GLXFBConfig* (*)(Display*, int, int*)>("glXGetFBConfigs");
-	return f ? f(display, screen, count) : nullptr;
-}
-static int lr_glXGetFBConfigAttrib(Display* display, GLXFBConfig config, int attribute, int* value)
-{
-	static auto f = lr_x11_symbol<int (*)(Display*, GLXFBConfig, int, int*)>("glXGetFBConfigAttrib");
-	return f ? f(display, config, attribute, value) : 1;
-}
-static void lr_XFree(void* data)
-{
-	static auto f = lr_x11_symbol<int (*)(void*)>("XFree");
-	if (f)
-		f(data);
-}
-#endif // __ANDROID__
-
-// EGL fallback for Wayland sessions: RetroArch uses EGL there, so lr_glXGetCurrentContext()
-// returns NULL and the GLX path can't grab the frontend context.
-#include <EGL/egl.h>
-#ifndef EGL_CONTEXT_MAJOR_VERSION
-#define EGL_CONTEXT_MAJOR_VERSION 0x3098
-#endif
-#ifndef EGL_CONTEXT_MINOR_VERSION
-#define EGL_CONTEXT_MINOR_VERSION 0x30FB
-#endif
-#ifndef EGL_CONTEXT_OPENGL_PROFILE_MASK
-#define EGL_CONTEXT_OPENGL_PROFILE_MASK 0x30FD
-#endif
-#ifndef EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT
-#define EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT 0x00000001
-#endif
-// egl.h here only exposes EGL types (its prototypes sit behind EGL_EGL_PROTOTYPES,
-// and another header pulled egl.h in first with them disabled). Declare the few EGL
-// entry points we need ourselves — an identical redeclaration is harmless if visible.
-// eglGetCurrentDisplay is already declared by another header in this TU; the rest were
-// missing (egl.h's prototypes are gated off here), so declare them ourselves.
-extern "C" {
-EGLContext eglGetCurrentContext(void);
-EGLSurface eglGetCurrentSurface(EGLint readdraw);
-EGLBoolean eglBindAPI(EGLenum api);
-EGLint     eglGetError(void);
-EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx, EGLint attribute, EGLint* value);
-EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list, EGLConfig* configs, EGLint config_size, EGLint* num_config);
-EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_context, const EGLint* attrib_list);
-EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx);
-__eglMustCastToProperFunctionPointerType eglGetProcAddress(const char* procname);
-}
-
-// Shared GL context for Cemu GPU thread. Android has no GLX - it always goes
-// through EGL, so the frontend context is captured there instead.
-#ifndef __ANDROID__
-static Display* s_glx_display = nullptr;
-static GLXDrawable s_glx_drawable = 0;
-static GLXContext s_glx_shared_context = nullptr;  // created for GPU thread
-static GLXContext s_glx_frontend_context = nullptr; // RetroArch's context
-#endif
-
-// EGL equivalents (used when the frontend runs on EGL, e.g. Wayland)
-static bool s_use_egl = false;
-static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
-static EGLSurface s_egl_surface = EGL_NO_SURFACE;
-static EGLContext s_egl_shared_context = EGL_NO_CONTEXT;  // created for GPU thread
-static EGLContext s_egl_frontend_context = EGL_NO_CONTEXT; // RetroArch's context
-
-// NOTE: Cemu's glFunctions.h declares `eglGetCurrentDisplay` as a global function
-// POINTER (loaded lazily via dlsym in LoadOpenGLImports). At context_reset time that
-// pointer is still null, so calling the name here would crash. Resolve the real libEGL
-// symbol ourselves instead.
-static EGLDisplay egl_current_display()
-{
-	typedef EGLDisplay (*PFN_egl_gcd)(void);
-	static PFN_egl_gcd fn = nullptr;
-	if (!fn)
-	{
-		void* libegl = dlopen("libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
-		if (!libegl) libegl = dlopen("libEGL.so", RTLD_NOW | RTLD_GLOBAL);
-		if (libegl) fn = (PFN_egl_gcd)dlsym(libegl, "eglGetCurrentDisplay");
-	}
-	return fn ? fn() : EGL_NO_DISPLAY;
-}
-
-#endif // ENABLE_OPENGL
-#endif // _WIN32
-
-// Set once the GPU thread has our shared context current.
-static bool s_gpu_context_made_current = false;
-
-// GL entry points are resolved through whichever loader the platform provides.
-#ifdef ENABLE_OPENGL
-static void* cemu_gl_get_proc(const char* name)
-{
-#ifdef _WIN32
-	void* p = (void*)wglGetProcAddress(name);
-	if (!p)
-	{
-		// wglGetProcAddress only knows extensions; core 1.1 entry points live in
-		// the DLL itself.
-		static HMODULE s_opengl32 = LoadLibraryA("opengl32.dll");
-		if (s_opengl32)
-			p = (void*)GetProcAddress(s_opengl32, name);
-	}
-	return p;
-#elif defined(__ANDROID__)
-	// No GLX; eglGetProcAddress covers both core and extension entry points here.
-	return (void*)eglGetProcAddress(name);
-#else
-	return (void*)lr_glXGetProcAddress((const GLubyte*)name);
-#endif
-}
-#endif // ENABLE_OPENGL
 
 // ============================================================================
 // CafeSystem implementation for libretro
@@ -466,6 +266,17 @@ static void libretro_set_log_to_file(bool toFile)
 	std::abort();
 }
 
+// One step of a wait on the frontend's thread for the GPU to get somewhere.
+// With the GPU on a cothread of this thread, waiting is running it; with a
+// thread of its own, it is a millisecond of sleep.
+static void libretro_gpu_wait_step()
+{
+	if (Latte_IsGpuCothread())
+		Latte_ServeGpu();
+	else
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
 // Runs on: the frontend's thread, in context_destroy. Says what went wrong and
 // lets the close carry on. This used to end the process, on the grounds that a
 // context going away with the core's objects still on it leaves them for the
@@ -491,8 +302,9 @@ static bool libretro_wait_for_gpu_handover(const char* what)
 	if (!Latte_IsGpuHandingContextBack())
 		return false;
 	cemuLog_log(LogType::Force, "[LatteThread] {}, and it is handing the graphics context back on its way out - waiting for that", what);
-	for (int i = 0; i < 10000 && Latte_IsGpuHandingContextBack(); i++)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (Latte_IsGpuHandingContextBack() && std::chrono::steady_clock::now() < deadline)
+		libretro_gpu_wait_step();
 	if (Latte_IsGpuHandingContextBack())
 		cemuLog_log(LogType::Force, "[LatteThread] ten seconds in and the handover is still going; the context goes anyway");
 	else
@@ -562,12 +374,6 @@ static std::string s_wua_convert_help;
 static std::atomic_bool s_gpu_context_created{false};
 static std::string s_game_path;
 
-// Frontend GL objects for blitting (reset on context destroy/resize). Plain
-// unsigned int rather than GLuint — identical type, but it keeps the context
-// bookkeeping compiling in a build with no GL headers.
-static unsigned int s_frontend_read_fbo = 0;
-static unsigned int s_frontend_read_rbo_attached = 0;
-static unsigned int s_frontend_upload_tex = 0;
 
 // Render Ahead (cemu_render_ahead): the GPU thread is let into the next frame
 // at the end of retro_run rather than at its start.
@@ -640,7 +446,7 @@ static std::atomic<uint64_t> s_prof_frames_ready{0};
 
 void libretro_frame_gate_wait()
 {
-	if (!s_game_loaded)
+	if (!s_game_loaded || Latte_IsOnGpuCothread())
 		return;
 	const auto waitStart = std::chrono::steady_clock::now();
 	struct AddWait
@@ -672,7 +478,9 @@ void libretro_frame_gate_wait()
 // loop left running would spin on an empty ring instead of standing still.
 void libretro_frame_window_wait()
 {
-	if (!s_game_loaded)
+	// A GPU on a cothread only runs while retro_run is running it: there is no
+	// window to keep it out of.
+	if (!s_game_loaded || Latte_IsOnGpuCothread())
 		return;
 	// The state is written under s_gate_mutex but read here without it. This
 	// runs on every pass of the scheduler's idle loop - millions a second on
@@ -824,21 +632,16 @@ static void RETRO_CALLCONV libretro_audio_thread_state(bool enabled)
 	s_audio_thread_active.store(enabled, std::memory_order_relaxed);
 }
 
-// Framebuffer for software readback
+// The size the picture is handed over at when nothing has said otherwise
 static constexpr uint32_t SCREEN_WIDTH = 1280;
 static constexpr uint32_t SCREEN_HEIGHT = 720;
-std::vector<uint32_t> s_libretro_framebuffer(SCREEN_WIDTH * SCREEN_HEIGHT);
-static auto& s_framebuffer = s_libretro_framebuffer; // alias for existing OpenGL code
-// The size of the frame in s_framebuffer. retro_run lets the GPU thread go on
-// with the next frame before it uploads this one, so the readback and the
-// upload overlap: both hold this lock. Without it the readback resizing the
-// buffer for a new size freed it under the upload (heap corruption on the
-// first frame a resolution pack sized differently), and at a fixed size a
-// frame could be read half overwritten by the next.
-static std::mutex s_gl_frame_mutex;
+// The finished picture: the backbuffer it was drawn into and its size, set by
+// the GPU at a swap and read by retro_run. Both run on the frontend's thread
+// (the GPU as its cothread), one after the other, so nothing guards them.
+static unsigned int s_gl_frame_fbo = 0;
 static uint32_t s_gl_frame_width = SCREEN_WIDTH, s_gl_frame_height = SCREEN_HEIGHT;
-// The size of the frame retro_run uploaded last, which is what the frontend is
-// told: the GPU thread may already have read the next one at another size.
+// The size of the frame retro_run presented last, which is what the frontend
+// is told.
 static uint32_t s_gl_shown_width = SCREEN_WIDTH, s_gl_shown_height = SCREEN_HEIGHT;
 static bool s_use_hw_render = false;
 static bool s_hw_render_initialized = false;
@@ -1011,6 +814,13 @@ static bool s_next_layout_button_held = false;
 static bool s_layout_combo_held_this_frame = false;
 
 static retro_hw_render_callback s_hw_render{};
+
+#ifdef ENABLE_OPENGL
+static void* cemu_gl_get_proc(const char* name)
+{
+	return s_hw_render.get_proc_address ? (void*)s_hw_render.get_proc_address(name) : nullptr;
+}
+#endif
 
 #ifdef ENABLE_VULKAN
 // Vulkan HW render interface
@@ -1530,107 +1340,47 @@ public:
 
 	bool MakeCurrent(bool padView) override
 	{
+		// One context, the frontend's, and it is current whenever the GPU runs:
+		// the GPU is a cothread of the frontend's thread (Latte.h), run from
+		// inside the callbacks during which libretro guarantees it.
 		if (padView)
 			return false;
-		if (!s_hw_render_initialized || s_shutting_down)
-			return false;
-		// Make our shared GL context current on the GPU thread (WGL on Windows,
-		// EGL on Wayland, GLX on X11). Without the OpenGL backend there is no
-		// such context and nothing calls this.
-#ifndef ENABLE_OPENGL
-		return false;
-#elif defined(_WIN32)
-		if (s_wgl_shared_context && s_wgl_frontend_dc && !s_gpu_context_made_current)
-		{
-			if (wglMakeCurrent(s_wgl_frontend_dc, s_wgl_shared_context))
-			{
-				s_gpu_context_made_current = true;
-				libretro_log(RETRO_LOG_INFO, "GPU thread WGL context made current successfully\n");
-			}
-			else
-			{
-				libretro_log(RETRO_LOG_ERROR, "Failed to make GPU thread WGL context current (%lu)\n",
-					(unsigned long)GetLastError());
-				return false;
-			}
-		}
-#else
-		if (s_use_egl)
-		{
-			if (s_egl_shared_context != EGL_NO_CONTEXT && s_egl_display != EGL_NO_DISPLAY && !s_gpu_context_made_current)
-			{
-				eglBindAPI(EGL_OPENGL_API);
-				// The GPU thread only renders to FBOs, never to the window surface (which
-				// the frontend context holds on another thread → EGL_BAD_ACCESS if shared).
-				// Bind surfaceless (EGL_KHR_surfaceless_context, supported by Mesa).
-				if (eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, s_egl_shared_context))
-				{
-					s_gpu_context_made_current = true;
-					libretro_log(RETRO_LOG_INFO, "GPU thread EGL context made current successfully\n");
-				}
-				else
-				{
-					libretro_log(RETRO_LOG_ERROR, "Failed to make GPU thread EGL context current (0x%x)\n", eglGetError());
-					return false;
-				}
-			}
-		}
-#ifndef __ANDROID__
-		else if (s_glx_shared_context && s_glx_display && s_glx_drawable && !s_gpu_context_made_current)
-		{
-			int result = lr_glXMakeCurrent(s_glx_display, s_glx_drawable, s_glx_shared_context);
-			if (result)
-			{
-				s_gpu_context_made_current = true;
-				libretro_log(RETRO_LOG_INFO, "GPU thread GL context made current successfully\n");
-			}
-			else
-			{
-				libretro_log(RETRO_LOG_ERROR, "Failed to make GPU thread GL context current\n");
-				return false;
-			}
-		}
-#endif // __ANDROID__
-#endif // _WIN32
-		return true;
+		return s_hw_render_initialized && !s_shutting_down;
+	}
+
+	void* GetProcAddress(const char* name) const override
+	{
+		return cemu_gl_get_proc(name);
 	}
 
 	void SwapBuffers(bool swapTV, bool swapDRC) override
 	{
 		if (s_shutting_down)
 			return;
-		if (swapTV || swapDRC)
+		if (!swapTV && !swapDRC)
+			return;
+		// The picture stays where it was drawn; retro_run blits it into the
+		// frontend's framebuffer on the same context. Only which framebuffer and
+		// how much of it are handed over. At the size the backbuffer was drawn at
+		// (libretro_gl_picture_size).
+		extern GLuint libretro_getBackbufferFBO(int, int);
+		int width, height;
+		WindowSystem::GetWindowPhysSize(width, height);
+		if (width <= 0 || height <= 0)
 		{
-			// Read pixels from our backbuffer FBO on the GPU thread (where GL context is valid)
-			// At the size the backbuffer was drawn at (libretro_gl_picture_size)
-			extern GLuint libretro_getBackbufferFBO(int, int);
-			int width, height;
-			WindowSystem::GetWindowPhysSize(width, height);
-			if (width <= 0 || height <= 0)
-			{
-				width = SCREEN_WIDTH;
-				height = SCREEN_HEIGHT;
-			}
-			GLuint fbo = libretro_getBackbufferFBO(width, height);
-			{
-				std::lock_guard lock(s_gl_frame_mutex);
-				if (s_framebuffer.size() != (size_t)width * height)
-					s_framebuffer.resize((size_t)width * height);
-				glBindFramebuffer(GL_READ_FRAMEBUFFER_EXT, fbo);
-				lr_glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, s_framebuffer.data());
-				s_gl_frame_width = width;
-				s_gl_frame_height = height;
-			}
-
-			libretro_signal_frame_ready();
-
-			// The frame is the frontend's now; wait to be asked for the next one.
-			// Only for the TV swap: a DRC swap is part of the same frame, and
-			// parking on both would halve the frame rate of a title that does
-			// them separately.
-			if (swapTV)
-				libretro_frame_gate_wait();
+			width = SCREEN_WIDTH;
+			height = SCREEN_HEIGHT;
 		}
+		s_gl_frame_fbo = libretro_getBackbufferFBO(width, height);
+		s_gl_frame_width = width;
+		s_gl_frame_height = height;
+		libretro_signal_frame_ready();
+		// The frame is the frontend's now: give its thread back until the next
+		// retro_run. Only for the TV swap - a DRC swap is part of the same frame,
+		// and stopping at both would halve the frame rate of a title that does
+		// them separately.
+		if (swapTV)
+			Latte_GpuYield(LatteGpuYield::Frame);
 	}
 };
 
@@ -4360,6 +4110,8 @@ static bool libretro_stop_title()
 	cemuLog_log(LogType::Force, "[libretro] shutting the title down: scheduler, GPU thread, IOSU, then the save flush");
 	libretro_clear_memory_maps();
 	CafeSystem::ShutdownTitle();
+	// The backbuffer went with the renderer: nothing left to present
+	s_gl_frame_fbo = 0;
 
 	libretro_log(RETRO_LOG_INFO, "title shut down, save data flushed\n");
 
@@ -5456,8 +5208,16 @@ static void libretro_prepare_and_launch_title()
 
 	// Wait for GPU init
 	libretro_log(RETRO_LOG_INFO, "waiting for GPU init\n");
-	while (!g_isGPUInitFinished)
-		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	// Under OpenGL the GPU is a cothread of this thread (Latte.h), and getting
+	// there - graphic packs, the shader cache - is work this thread does by
+	// running it.
+	while (!g_isGPUInitFinished && Latte_IsGpuThreadAlive())
+	{
+		if (Latte_IsGpuCothread())
+			Latte_ServeGpu();
+		else
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
 
 	// Keep TV screen as default (DRC is black for some games)
 
@@ -5539,202 +5299,6 @@ static void libretro_launch_game()
 	libretro_prepare_and_launch_title();
 }
 
-
-// Wayland / EGL frontends: build the shared GPU-thread context via EGL instead of GLX.
-#ifdef ENABLE_OPENGL
-#ifdef _WIN32
-
-// Takes RetroArch's WGL context and creates one for Cemu's GPU thread that
-// shares its objects (textures, buffers), the same thing the GLX/EGL paths do.
-static void libretro_create_shared_wgl_context()
-{
-	s_wgl_frontend_dc = wglGetCurrentDC();
-	s_wgl_frontend_context = wglGetCurrentContext();
-	if (!s_wgl_frontend_dc || !s_wgl_frontend_context)
-	{
-		libretro_log(RETRO_LOG_ERROR, "Frontend WGL context not current in context_reset\n");
-		return;
-	}
-
-	libretro_log(RETRO_LOG_INFO, "Frontend GL context: dc=%p ctx=%p\n",
-		s_wgl_frontend_dc, s_wgl_frontend_context);
-
-	HGLRC shared = wglCreateContext(s_wgl_frontend_dc);
-	if (!shared)
-	{
-		libretro_log(RETRO_LOG_ERROR, "wglCreateContext failed (%lu)\n", (unsigned long)GetLastError());
-		return;
-	}
-
-	if (!wglShareLists(s_wgl_frontend_context, shared))
-	{
-		libretro_log(RETRO_LOG_ERROR, "wglShareLists failed (%lu)\n", (unsigned long)GetLastError());
-		wglDeleteContext(shared);
-		return;
-	}
-
-	s_wgl_shared_context = shared;
-	libretro_log(RETRO_LOG_INFO, "Created shared GL context for GPU thread: %p\n", s_wgl_shared_context);
-}
-
-#else
-
-static void libretro_create_shared_egl_context()
-{
-	s_egl_frontend_context = eglGetCurrentContext();
-	s_egl_display = egl_current_display();
-	s_egl_surface = eglGetCurrentSurface(EGL_DRAW);
-
-	if (s_egl_frontend_context == EGL_NO_CONTEXT || s_egl_display == EGL_NO_DISPLAY)
-	{
-		libretro_log(RETRO_LOG_ERROR, "No current GLX or EGL context (frontend display=%p ctx=%p)\n",
-			s_egl_display, s_egl_frontend_context);
-		return;
-	}
-
-	s_use_egl = true;
-	libretro_log(RETRO_LOG_INFO, "Frontend EGL context (Wayland path): display=%p surface=%p ctx=%p\n",
-		s_egl_display, s_egl_surface, s_egl_frontend_context);
-
-	if (!eglBindAPI(EGL_OPENGL_API))
-	{
-		libretro_log(RETRO_LOG_ERROR, "eglBindAPI(EGL_OPENGL_API) failed (0x%x)\n", eglGetError());
-		return;
-	}
-
-	// Match the frontend's EGLConfig so the shared context is compatible.
-	EGLConfig config = nullptr;
-	EGLint matched = 0;
-	EGLint cfgId = 0;
-	if (eglQueryContext(s_egl_display, s_egl_frontend_context, EGL_CONFIG_ID, &cfgId) && cfgId != 0)
-	{
-		const EGLint byId[] = { EGL_CONFIG_ID, cfgId, EGL_NONE };
-		eglChooseConfig(s_egl_display, byId, &config, 1, &matched);
-	}
-	if (matched == 0)
-	{
-		// Fallback: any config that can back a desktop-GL window context.
-		const EGLint generic[] = {
-			EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-			EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-			EGL_NONE
-		};
-		eglChooseConfig(s_egl_display, generic, &config, 1, &matched);
-	}
-
-	// OpenGL 4.5 Core Profile shared context (shares object namespace with the frontend ctx)
-	const EGLint ctxAttribs[] = {
-		EGL_CONTEXT_MAJOR_VERSION, 4,
-		EGL_CONTEXT_MINOR_VERSION, 5,
-		EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-		EGL_NONE
-	};
-	s_egl_shared_context = eglCreateContext(s_egl_display, config, s_egl_frontend_context, ctxAttribs);
-
-	if (s_egl_shared_context != EGL_NO_CONTEXT)
-	{
-		libretro_log(RETRO_LOG_INFO, "Created shared EGL GL 4.5 context for GPU thread: %p\n", s_egl_shared_context);
-	}
-	else
-	{
-		libretro_log(RETRO_LOG_ERROR, "Failed to create shared EGL context (0x%x)\n", eglGetError());
-	}
-}
-
-static void libretro_create_shared_gl_context()
-{
-#ifdef __ANDROID__
-	// No GLX here at all - the frontend context is always EGL.
-	libretro_create_shared_egl_context();
-	return;
-#else
-	// Capture the frontend's GL context. Prefer GLX (X11); on Wayland the frontend
-	// runs on EGL and lr_glXGetCurrentContext() returns NULL, so fall back to EGL.
-	s_glx_frontend_context = lr_glXGetCurrentContext();
-	if (!s_glx_frontend_context)
-	{
-		libretro_create_shared_egl_context();
-		return;
-	}
-	s_glx_display = lr_glXGetCurrentDisplay();
-	s_glx_drawable = lr_glXGetCurrentDrawable();
-
-	if (!s_glx_display)
-	{
-		libretro_log(RETRO_LOG_ERROR, "Cannot get current GLX display (ctx=%p)\n",
-			s_glx_frontend_context);
-		return;
-	}
-
-	libretro_log(RETRO_LOG_INFO, "Frontend GL context: display=%p drawable=0x%lx ctx=%p\n",
-		s_glx_display, (unsigned long)s_glx_drawable, s_glx_frontend_context);
-
-	// Get the FBConfig used by the frontend context
-	// We need this to create a compatible shared context
-	int screenNum = DefaultScreen(s_glx_display);
-
-	// Use glXCreateContextAttribsARB for core profile context
-	typedef GLXContext (*glXCreateContextAttribsARBProc)(Display*, GLXFBConfig, GLXContext, int, const int*);
-	glXCreateContextAttribsARBProc _glXCreateContextAttribsARB =
-		(glXCreateContextAttribsARBProc)cemu_gl_get_proc("glXCreateContextAttribsARB");
-
-	if (!_glXCreateContextAttribsARB)
-	{
-		libretro_log(RETRO_LOG_ERROR, "glXCreateContextAttribsARB not available\n");
-		return;
-	}
-
-	// Get the FBConfig ID from the frontend's current context
-	int fbconfig_id = 0;
-	lr_glXQueryContext(s_glx_display, s_glx_frontend_context, GLX_FBCONFIG_ID, &fbconfig_id);
-
-	// Find matching FBConfig
-	int nelements = 0;
-	GLXFBConfig* configs = lr_glXGetFBConfigs(s_glx_display, screenNum, &nelements);
-	if (!configs || nelements == 0)
-	{
-		libretro_log(RETRO_LOG_ERROR, "No GLX FBConfigs available\n");
-		return;
-	}
-
-	GLXFBConfig chosen_config = configs[0]; // fallback
-	for (int i = 0; i < nelements; i++)
-	{
-		int id = 0;
-		lr_glXGetFBConfigAttrib(s_glx_display, configs[i], GLX_FBCONFIG_ID, &id);
-		if (id == fbconfig_id)
-		{
-			chosen_config = configs[i];
-			break;
-		}
-	}
-
-	// Create OpenGL 4.5 Core Profile shared context
-	int context_attribs[] = {
-		GLX_CONTEXT_MAJOR_VERSION_ARB, 4,
-		GLX_CONTEXT_MINOR_VERSION_ARB, 5,
-		GLX_CONTEXT_PROFILE_MASK_ARB, GLX_CONTEXT_CORE_PROFILE_BIT_ARB,
-		0
-	};
-
-	s_glx_shared_context = _glXCreateContextAttribsARB(
-		s_glx_display, chosen_config, s_glx_frontend_context, 1 /*direct*/, context_attribs);
-
-	lr_XFree(configs);
-
-	if (s_glx_shared_context)
-	{
-		libretro_log(RETRO_LOG_INFO, "Created shared GL 4.5 context for GPU thread: %p\n", s_glx_shared_context);
-	}
-	else
-	{
-		libretro_log(RETRO_LOG_ERROR, "Failed to create shared GL context\n");
-	}
-#endif // __ANDROID__
-}
-
-#endif // _WIN32
-#endif // ENABLE_OPENGL
 
 // True once the frontend has taken its graphics context apart. On exit that
 // happens *before* retro_unload_game, and everything Cemu does to tear down its
@@ -5828,67 +5392,7 @@ static void libretro_context_reset()
 	s_frontend_context_gone = false;
 
 	// Reset frontend GL objects - context was recreated, old objects are invalid
-	s_frontend_read_fbo = 0;
-	s_frontend_read_rbo_attached = 0;
-	s_frontend_upload_tex = 0;
-
-	// Create or update shared GL context for GPU thread (OpenGL only)
-#ifdef ENABLE_OPENGL
-	if (s_graphics_api == SelectedGraphicsAPI::OpenGL)
-	{
-#ifdef _WIN32
-		if (!s_wgl_shared_context)
-		{
-			libretro_create_shared_wgl_context();
-		}
-		else
-		{
-			// A context after a context: not a fullscreen toggle, which with
-			// cache_context set never reaches here, but a real device loss or a
-			// frontend that could not keep the old one. Re-capture the DC and let
-			// the GPU thread make its context current again.
-			s_wgl_frontend_dc = wglGetCurrentDC();
-			s_gpu_context_made_current = false;
-			cemuLog_log(LogType::Force, "[libretro] a context came back with a shared WGL context still here - the rebuild path");
-			libretro_log(RETRO_LOG_INFO, "WGL context restored, dc=%p\n", s_wgl_frontend_dc);
-		}
-#else
-#ifdef __ANDROID__
-		const bool haveSharedContext = (s_egl_shared_context != EGL_NO_CONTEXT);
-#else
-		const bool haveSharedContext = s_use_egl ? (s_egl_shared_context != EGL_NO_CONTEXT)
-		                                          : (s_glx_shared_context != nullptr);
-#endif
-		if (!haveSharedContext)
-		{
-			libretro_create_shared_gl_context();
-		}
-		else if (s_use_egl)
-		{
-			// A context after a context - see the WGL branch above for what that
-			// means now. Refresh display/surface for MakeCurrent.
-			s_egl_display = egl_current_display();
-			s_egl_surface = eglGetCurrentSurface(EGL_DRAW);
-			s_gpu_context_made_current = false;
-			cemuLog_log(LogType::Force, "[libretro] a context came back with a shared EGL context still here - the rebuild path");
-			libretro_log(RETRO_LOG_INFO, "EGL context restored, surface=%p\n", s_egl_surface);
-		}
-#ifndef __ANDROID__
-		else
-		{
-			// A context after a context - see the WGL branch above. Update the
-			// drawable for MakeCurrent.
-			s_glx_display = lr_glXGetCurrentDisplay();
-			s_glx_drawable = lr_glXGetCurrentDrawable();
-			s_gpu_context_made_current = false;
-			cemuLog_log(LogType::Force, "[libretro] a context came back with a shared GLX context still here - the rebuild path");
-			libretro_log(RETRO_LOG_INFO, "Context restored, updating drawable=0x%lx\n",
-				(unsigned long)s_glx_drawable);
-		}
-#endif // __ANDROID__
-#endif // _WIN32
-	}
-#endif // ENABLE_OPENGL
+	s_gl_frame_fbo = 0; // went with the context
 
 	libretro_create_renderer();
 
@@ -6001,9 +5505,7 @@ static void libretro_context_destroy()
 		if (!libretro_wait_for_gpu_handover("the GPU thread was already gone when the context went away"))
 			cemuLog_log(LogType::Force, "[LatteThread] the GPU thread was already gone when the context went away");
 		s_hw_render_initialized = false;
-		s_frontend_read_fbo = 0;
-		s_frontend_read_rbo_attached = 0;
-		s_gpu_context_made_current = false;
+		s_gl_frame_fbo = 0; // went with the context
 		s_frontend_context_gone = true;
 		return;
 	}
@@ -6026,8 +5528,9 @@ static void libretro_context_destroy()
 	// through LatteThread_Exit and runs the same teardown there. Waiting for a
 	// gate it will never reach is how that turned into the whole budget spent
 	// and then the teardown racing the device's destruction.
-	for (int i = 0; i < 500 && !Latte_IsGpuAtPauseGate() && Latte_IsGpuThreadAlive(); i++)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	const auto gateDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+	while (!Latte_IsGpuAtPauseGate() && Latte_IsGpuThreadAlive() && std::chrono::steady_clock::now() < gateDeadline)
+		libretro_gpu_wait_step();
 	if (!Latte_IsGpuAtPauseGate())
 	{
 		// It may still arrive, so the request is withdrawn rather than left
@@ -6040,9 +5543,7 @@ static void libretro_context_destroy()
 		if (!libretro_wait_for_gpu_handover("the GPU thread left instead of reaching the pause gate"))
 			libretro_gpu_thread_late("the GPU thread did not reach the pause gate before the graphics context went away");
 		s_hw_render_initialized = false;
-		s_frontend_read_fbo = 0;
-		s_frontend_read_rbo_attached = 0;
-		s_gpu_context_made_current = false;
+		s_gl_frame_fbo = 0; // went with the context
 		s_frontend_context_gone = true;
 		return;
 	}
@@ -6053,8 +5554,9 @@ static void libretro_context_destroy()
 	// questions behind one half-second wait and aborted on a teardown that was
 	// simply still going. Ten seconds is long enough that only a wedge reaches
 	// it.
-	for (int i = 0; i < 10000 && !Latte_IsGpuParked(); i++)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	const auto parkDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (!Latte_IsGpuParked() && std::chrono::steady_clock::now() < parkDeadline)
+		libretro_gpu_wait_step();
 	libretro_frame_gate_hold_open(false);
 	if (!Latte_IsGpuParked())
 	{
@@ -6068,9 +5570,7 @@ static void libretro_context_destroy()
 		libretro_log(RETRO_LOG_INFO, "handed the core's GPU objects back before the context went away\n");
 
 	s_hw_render_initialized = false;
-	s_frontend_read_fbo = 0;
-	s_frontend_read_rbo_attached = 0;
-	s_gpu_context_made_current = false;
+	s_gl_frame_fbo = 0; // went with the context
 	s_frontend_context_gone = true;
 
 	// Nothing is left to clean up here: the GPU thread gave the context its
@@ -6252,7 +5752,12 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game)
 		s_hw_render.stencil = true;
 		s_hw_render.cache_context = true;
 
-		// Request shared GL context so Cemu GPU thread can use it from another thread
+		// A context of the core's own, which the frontend makes current around
+		// every call into the core and puts its own back after. The renderer
+		// keeps its GL state between frames and never asks GL what is bound,
+		// so a context the frontend also draws its menu and shaders with would
+		// change that state under it. Nothing else changes: the GPU still runs
+		// on the frontend's thread, inside its calls (Latte.h).
 		environ_cb(RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT, nullptr);
 
 		if (environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &s_hw_render))
@@ -6614,7 +6119,6 @@ RETRO_API void retro_unload_game()
 	// retro_init/retro_deinit and is deliberately left alone.
 	s_gpu_context_created = false;
 	s_hw_render_initialized = false;
-	s_gpu_context_made_current = false;
 	s_emu_initialized = false;
 	s_launch_attempted = false;
 	s_reset_requested.store(false, std::memory_order_release);
@@ -6645,9 +6149,7 @@ RETRO_API void retro_unload_game()
 	s_wua_destinations.clear();
 	s_wua_unavailable_reason.clear();
 	s_wua_convert_help.clear();
-	s_frontend_read_fbo = 0;
-	s_frontend_read_rbo_attached = 0;
-	s_frontend_upload_tex = 0;
+	s_gl_frame_fbo = 0; // went with the context
 
 	libretro_log(RETRO_LOG_INFO, "content closed, core unloaded\n");
 }
@@ -7274,36 +6776,111 @@ static void libretro_draw_cursor_gl(int width, int height)
 // Main run loop
 // ============================================================================
 
-// GL function pointers for blitting in retro_run (frontend GL context)
-// Use function pointers to avoid conflicts with CemuGL namespace
-typedef void (*PFNGLBINDFRAMEBUFFERPROC_)(unsigned int, unsigned int);
-typedef void (*PFNGLGENFRAMEBUFFERSPROC_)(int, unsigned int*);
-typedef void (*PFNGLBLITFRAMEBUFFERPROC_)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
-
-static PFNGLBINDFRAMEBUFFERPROC_ s_glBindFramebuffer = nullptr;
-static PFNGLGENFRAMEBUFFERSPROC_ s_glGenFramebuffers = nullptr;
-static PFNGLBLITFRAMEBUFFERPROC_ s_glBlitFramebuffer = nullptr;
-
 #ifdef ENABLE_OPENGL
-static void libretro_load_blit_gl_funcs()
+// The finished frame into the frontend's framebuffer: one blit, on the one
+// context there is. The renderer keeps its own idea of what is bound and
+// enabled and does not ask GL again, so everything this touches is put back
+// the way it found it - otherwise the next draw after this would go into the
+// frontend's framebuffer, or be scissored by the cursor's last rectangle.
+static void libretro_present_gl()
 {
-	if (s_glBindFramebuffer) return;
-	s_glBindFramebuffer = (PFNGLBINDFRAMEBUFFERPROC_)cemu_gl_get_proc("glBindFramebuffer");
-	s_glGenFramebuffers = (PFNGLGENFRAMEBUFFERSPROC_)cemu_gl_get_proc("glGenFramebuffers");
-	s_glBlitFramebuffer = (PFNGLBLITFRAMEBUFFERPROC_)cemu_gl_get_proc("glBlitFramebuffer");
+	typedef void (*BindFramebuffer)(unsigned int, unsigned int);
+	typedef void (*BlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
+	typedef void (*GetIntegerv)(unsigned int, int*);
+	typedef void (*GetFloatv)(unsigned int, float*);
+	typedef void (*GetBooleani_v)(unsigned int, unsigned int, unsigned char*);
+	typedef unsigned char (*IsEnabled)(unsigned int);
+	typedef void (*Cap)(unsigned int);
+	typedef void (*Scissor)(int, int, int, int);
+	typedef void (*ClearColor)(float, float, float, float);
+	typedef void (*ColorMaski)(unsigned int, unsigned char, unsigned char, unsigned char, unsigned char);
+	static BindFramebuffer bindFramebuffer;
+	static BlitFramebuffer blitFramebuffer;
+	static GetIntegerv getIntegerv;
+	static GetFloatv getFloatv;
+	static GetBooleani_v getBooleani_v;
+	static IsEnabled isEnabled;
+	static Cap enable, disable;
+	static Scissor scissor;
+	static ClearColor clearColor;
+	static ColorMaski colorMaski;
+	if (!bindFramebuffer)
+	{
+		bindFramebuffer = (BindFramebuffer)cemu_gl_get_proc("glBindFramebuffer");
+		blitFramebuffer = (BlitFramebuffer)cemu_gl_get_proc("glBlitFramebuffer");
+		getIntegerv = (GetIntegerv)cemu_gl_get_proc("glGetIntegerv");
+		getFloatv = (GetFloatv)cemu_gl_get_proc("glGetFloatv");
+		getBooleani_v = (GetBooleani_v)cemu_gl_get_proc("glGetBooleani_v");
+		isEnabled = (IsEnabled)cemu_gl_get_proc("glIsEnabled");
+		enable = (Cap)cemu_gl_get_proc("glEnable");
+		disable = (Cap)cemu_gl_get_proc("glDisable");
+		scissor = (Scissor)cemu_gl_get_proc("glScissor");
+		clearColor = (ClearColor)cemu_gl_get_proc("glClearColor");
+		colorMaski = (ColorMaski)cemu_gl_get_proc("glColorMaski");
+	}
+	if (!bindFramebuffer || !blitFramebuffer || !getIntegerv || !getFloatv || !getBooleani_v ||
+		!isEnabled || !enable || !disable || !scissor || !clearColor || !colorMaski)
+		return;
+
+	constexpr unsigned int kReadFramebuffer = 0x8CA8, kDrawFramebuffer = 0x8CA9;
+	constexpr unsigned int kReadFramebufferBinding = 0x8CAA, kDrawFramebufferBinding = 0x8CA6;
+	constexpr unsigned int kScissorTest = 0x0C11, kScissorBox = 0x0C10;
+	constexpr unsigned int kColorClearValue = 0x0C22, kColorWritemask = 0x0C23;
+	constexpr unsigned int kColorBufferBit = 0x00004000, kNearest = 0x2600;
+
+	int readFbo = 0, drawFbo = 0, box[4] = {};
+	float clear[4] = {};
+	unsigned char mask[4] = {1, 1, 1, 1};
+	getIntegerv(kReadFramebufferBinding, &readFbo);
+	getIntegerv(kDrawFramebufferBinding, &drawFbo);
+	const bool scissorOn = isEnabled(kScissorTest) != 0;
+	getIntegerv(kScissorBox, box);
+	getFloatv(kColorClearValue, clear);
+	getBooleani_v(kColorWritemask, 0, mask);
+
+	const int w = (int)s_gl_frame_width, h = (int)s_gl_frame_height;
+	disable(kScissorTest); // a blit is scissored too
+	colorMaski(0, 1, 1, 1, 1); // and the cursor's clears are masked
+	bindFramebuffer(kReadFramebuffer, s_gl_frame_fbo);
+	bindFramebuffer(kDrawFramebuffer, (unsigned int)s_hw_render.get_current_framebuffer());
+	// Same orientation on both sides: GL's, bottom up.
+	blitFramebuffer(0, 0, w, h, 0, 0, w, h, kColorBufferBit, kNearest);
+	libretro_draw_cursor_gl(w, h);
+
+	colorMaski(0, mask[0], mask[1], mask[2], mask[3]);
+	clearColor(clear[0], clear[1], clear[2], clear[3]);
+	scissor(box[0], box[1], box[2], box[3]);
+	if (scissorOn)
+		enable(kScissorTest);
+	else
+		disable(kScissorTest);
+	bindFramebuffer(kReadFramebuffer, (unsigned int)readFbo);
+	bindFramebuffer(kDrawFramebuffer, (unsigned int)drawFbo);
+	s_gl_shown_width = s_gl_frame_width;
+	s_gl_shown_height = s_gl_frame_height;
+}
+
+// retro_run's wait for a frame, the cothread way: the GPU runs here, on this
+// thread, until it finishes a frame or the frame's time is up. When it stops
+// for anything else, what it is waiting for comes from the emulated CPU on
+// another thread, so this steps aside for that and asks again.
+static bool libretro_run_gpu_for_frame(std::chrono::steady_clock::time_point deadline)
+{
+	while (!s_frame_ready.load(std::memory_order_acquire))
+	{
+		const LatteGpuYield why = Latte_RunGpu();
+		if (s_frame_ready.load(std::memory_order_acquire))
+			break;
+		// Gone, or held at the pause gate: no frame is coming this run.
+		if (why == LatteGpuYield::Finished || why == LatteGpuYield::Parked)
+			return false;
+		if (std::chrono::steady_clock::now() >= deadline)
+			return false;
+		std::this_thread::yield();
+	}
+	return true;
 }
 #endif // ENABLE_OPENGL
-
-#define GL_COLOR_BUFFER_BIT_ 0x00004000
-#define GL_NEAREST_ 0x2600
-#define GL_COLOR_ATTACHMENT0_ 0x8CE0
-#define GL_DRAW_FRAMEBUFFER_ 0x8CA9
-
-// Get the shared renderbuffer from the GPU thread's FBO. Only the GL path has
-// one; the declaration follows the GL headers that define its return type.
-#ifdef ENABLE_OPENGL
-extern GLuint libretro_getBackbufferRBO();
-#endif
 
 // The end of every retro_run that got as far as a frame: hand the audio over,
 // and account for where the frame's time went (cemu_log_audio).
@@ -7448,6 +7025,9 @@ static std::string libretro_cpu_clocks()
 
 static int64_t libretro_thread_cpu_us(std::thread::native_handle_type h)
 {
+	// No thread: a GPU on a cothread has none of its own (Latte.h)
+	if (h == std::thread::native_handle_type{})
+		return -1;
 #if BOOST_OS_WINDOWS
 	// MSVC's std::thread handle is the thread's HANDLE; MinGW's (winpthreads)
 	// is a pthread_t, whose HANDLE winpthreads gives
@@ -7518,7 +7098,10 @@ static void libretro_log_thread_time(std::chrono::steady_clock::time_point now)
 	std::string line = "threads, % of one host core:";
 	for (size_t i = 0; i < cores; i++)
 		line += fmt::format(" PPC core {} {},", i, busy(i));
-	line += fmt::format(" GPU {}, frontend {}", busy(cores), busy(cores + 1));
+	if (Latte_IsGpuCothread())
+		line += fmt::format(" frontend with the GPU {}", busy(cores + 1));
+	else
+		line += fmt::format(" GPU {}, frontend {}", busy(cores), busy(cores + 1));
 	cemuLog_log(LogType::Force, "{}", line);
 #if defined(__linux__)
 	cemuLog_log(LogType::Force, "{}", libretro_cpu_clocks());
@@ -7857,11 +7440,22 @@ RETRO_API void retro_run()
 	// time, as standalone gives it (NNshi); waiting 72 % of it (the old fixed
 	// 12 ms at 60 Hz) measured no faster on a PC or a phone.
 	{
-		std::unique_lock lock(s_frame_mutex);
-		profTimedOut = !s_frame_cv.wait_for(lock, std::chrono::microseconds((int64_t)(1000000.0 / s_output_fps)), [] {
-			return s_frame_ready.load();
-		});
-		s_frame_ready = false;
+		const auto frameTime = std::chrono::microseconds((int64_t)(1000000.0 / s_output_fps));
+#ifdef ENABLE_OPENGL
+		if (Latte_IsGpuCothread())
+		{
+			profTimedOut = !libretro_run_gpu_for_frame(prof_clock::now() + frameTime);
+			s_frame_ready = false;
+		}
+		else
+#endif
+		{
+			std::unique_lock lock(s_frame_mutex);
+			profTimedOut = !s_frame_cv.wait_for(lock, frameTime, [] {
+				return s_frame_ready.load();
+			});
+			s_frame_ready = false;
+		}
 	}
 	const auto profWaited = prof_clock::now();
 
@@ -7925,96 +7519,11 @@ RETRO_API void retro_run()
 	}
 #endif
 
-	// OpenGL: Upload CPU framebuffer (from GPU thread's glReadPixels) to RetroArch's HW FBO
+	// OpenGL: the finished frame is still in the backbuffer it was drawn into,
+	// on this same context - one blit into the frontend's framebuffer.
 #ifdef ENABLE_OPENGL
-	{
-		typedef void (*PFNGLGENTEXTURESPROC_)(int, unsigned int*);
-		typedef void (*PFNGLBINDTEXTUREPROC_)(unsigned int, unsigned int);
-		typedef void (*PFNGLTEXIMAGE2DPROC_)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
-		typedef void (*PFNGLTEXPARAMETERIPROC_)(unsigned int, unsigned int, int);
-		typedef void (*PFNGLENABLEPROC_)(unsigned int);
-		typedef void (*PFNGLDISABLEPROC_)(unsigned int);
-		typedef void (*PFNGLVIEWPORTPROC_)(int, int, int, int);
-		typedef void (*PFNGLDRAWARRAYSPROC_)(unsigned int, int, int);
-		typedef unsigned int (*PFNGLGETERRORPROC_)();
-
-		static PFNGLGENTEXTURESPROC_ _glGenTextures = nullptr;
-		static PFNGLBINDTEXTUREPROC_ _glBindTexture = nullptr;
-		static PFNGLTEXIMAGE2DPROC_ _glTexImage2D = nullptr;
-		static PFNGLTEXPARAMETERIPROC_ _glTexParameteri = nullptr;
-		static PFNGLENABLEPROC_ _glEnable = nullptr;
-		static PFNGLDISABLEPROC_ _glDisable = nullptr;
-		static PFNGLVIEWPORTPROC_ _glViewport = nullptr;
-		static PFNGLDRAWARRAYSPROC_ _glDrawArrays = nullptr;
-
-		if (!_glGenTextures)
-		{
-			_glGenTextures = (PFNGLGENTEXTURESPROC_)cemu_gl_get_proc("glGenTextures");
-			_glBindTexture = (PFNGLBINDTEXTUREPROC_)cemu_gl_get_proc("glBindTexture");
-			_glTexImage2D = (PFNGLTEXIMAGE2DPROC_)cemu_gl_get_proc("glTexImage2D");
-			_glTexParameteri = (PFNGLTEXPARAMETERIPROC_)cemu_gl_get_proc("glTexParameteri");
-			_glEnable = (PFNGLENABLEPROC_)cemu_gl_get_proc("glEnable");
-			_glDisable = (PFNGLDISABLEPROC_)cemu_gl_get_proc("glDisable");
-			_glViewport = (PFNGLVIEWPORTPROC_)cemu_gl_get_proc("glViewport");
-			_glDrawArrays = (PFNGLDRAWARRAYSPROC_)cemu_gl_get_proc("glDrawArrays");
-		}
-
-		if (!s_glBindFramebuffer) libretro_load_blit_gl_funcs();
-
-		// Bind RetroArch's FBO
-		uintptr_t ra_fbo = s_hw_render.get_current_framebuffer();
-		s_glBindFramebuffer(GL_DRAW_FRAMEBUFFER_, (GLuint)ra_fbo);
-
-		// Create/recreate upload texture after context reset
-		if (s_frontend_upload_tex == 0 && _glGenTextures)
-			_glGenTextures(1, &s_frontend_upload_tex);
-
-		if (s_frontend_upload_tex && _glBindTexture && _glTexImage2D)
-		{
-			_glBindTexture(0x0DE1 /*GL_TEXTURE_2D*/, s_frontend_upload_tex);
-			// Upload flipped (OpenGL is bottom-up, framebuffer is top-down from glReadPixels).
-			// glTexImage2D is done with the client memory when it returns.
-			uint32_t frameWidth, frameHeight;
-			{
-				std::lock_guard lock(s_gl_frame_mutex);
-				frameWidth = s_gl_frame_width;
-				frameHeight = s_gl_frame_height;
-				_glTexImage2D(0x0DE1, 0, 0x8058 /*GL_RGBA8*/, frameWidth, frameHeight, 0,
-					0x80E1 /*GL_BGRA*/, 0x1401 /*GL_UNSIGNED_BYTE*/, s_framebuffer.data());
-			}
-			s_gl_shown_width = frameWidth;
-			s_gl_shown_height = frameHeight;
-			_glTexParameteri(0x0DE1, 0x2801 /*GL_TEXTURE_MIN_FILTER*/, 0x2600 /*GL_NEAREST*/);
-			_glTexParameteri(0x0DE1, 0x2800 /*GL_TEXTURE_MAG_FILTER*/, 0x2600 /*GL_NEAREST*/);
-
-			// Draw fullscreen quad using texture
-			// In Core Profile we need a shader, but we can use glBlitFramebuffer from a texture-attached FBO instead
-			if (s_frontend_read_fbo == 0 && s_glGenFramebuffers)
-				s_glGenFramebuffers(1, &s_frontend_read_fbo);
-
-			if (s_frontend_read_fbo && s_glBlitFramebuffer)
-			{
-				// Attach texture to read FBO
-				typedef void (*PFNGLFRAMEBUFFERTEXTURE2DPROC_)(unsigned int, unsigned int, unsigned int, unsigned int, int);
-				static PFNGLFRAMEBUFFERTEXTURE2DPROC_ _glFramebufferTexture2D = nullptr;
-				if (!_glFramebufferTexture2D)
-					_glFramebufferTexture2D = (PFNGLFRAMEBUFFERTEXTURE2DPROC_)cemu_gl_get_proc("glFramebufferTexture2D");
-
-				s_glBindFramebuffer(GL_READ_FRAMEBUFFER_EXT, s_frontend_read_fbo);
-				if (_glFramebufferTexture2D)
-					_glFramebufferTexture2D(GL_READ_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_, 0x0DE1 /*GL_TEXTURE_2D*/, s_frontend_upload_tex, 0);
-
-				// Blit directly (no flip needed - glReadPixels already gives bottom-up which matches RetroArch)
-				s_glBlitFramebuffer(
-					0, 0, frameWidth, frameHeight,    // src
-					0, 0, frameWidth, frameHeight,    // dst
-					GL_COLOR_BUFFER_BIT_, GL_NEAREST_);
-
-				s_glBindFramebuffer(GL_READ_FRAMEBUFFER_EXT, 0);
-				libretro_draw_cursor_gl((int)frameWidth, (int)frameHeight);
-			}
-		}
-	}
+	if (s_gl_frame_fbo)
+		libretro_present_gl();
 #endif // ENABLE_OPENGL
 
 	libretro_report_out_size();

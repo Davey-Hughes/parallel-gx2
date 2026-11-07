@@ -52,6 +52,11 @@ void GLCanvas_SwapBuffers(bool swapTV, bool swapDRC)
 	g_openGLCanvasCallbacks->SwapBuffers(swapTV, swapDRC);
 }
 
+void* GLCanvas_GetProcAddress(const char* name)
+{
+	return g_openGLCanvasCallbacks->GetProcAddress(name);
+}
+
 GLuint GLCanvas_GetOutputFramebuffer()
 {
 	return g_openGLCanvasCallbacks->GetOutputFramebuffer();
@@ -75,10 +80,8 @@ void GLCanvas_AdjustScreenViewport(bool padView, sint32 windowWidth, sint32 wind
 namespace CemuGL
 {
 #define GLFUNC(__type, __name)	__type __name;
-#define EGLFUNC(__type, __name)	__type __name;
 #include "Common/GLInclude/glFunctions.h"
 #undef GLFUNC
-#undef EGLFUNC
 }
 
 #include "config/ActiveSettings.h"
@@ -158,10 +161,13 @@ OpenGLRenderer::OpenGLRenderer() : Renderer(RendererAPI::OpenGL)
 #endif
 }
 
+static void libretro_releaseBackbuffer();
+
 OpenGLRenderer::~OpenGLRenderer()
 {
 	if(m_pipeline != 0)
 		glDeleteProgramPipelines(1, &m_pipeline);
+	libretro_releaseBackbuffer();
 
 	glDeleteBuffers(1, &m_backbufferBlit_uniformBuffer);
 }
@@ -225,91 +231,14 @@ void OpenGLRenderer::DeleteFontTextures()
 
 typedef void(*GL_IMPORT)();
 
-#if BOOST_OS_WINDOWS
-GL_IMPORT _GetOpenGLFunction(HMODULE hLib, const char* name)
-{
-	GL_IMPORT r = (GL_IMPORT)wglGetProcAddress(name);
-	if (r == nullptr)
-		r = (GL_IMPORT)GetProcAddress(hLib, name);
-	return r;
-}
-
+// No wgl, glX, egl or CGL here: the context is the frontend's, current on the
+// thread the renderer runs on, and it comes with its own loader.
 void LoadOpenGLImports()
 {
-	HMODULE hLib = LoadLibraryA("opengl32.dll");
-#define GLFUNC(__type, __name)	__name = (__type)_GetOpenGLFunction(hLib, STRINGIFY(__name));
+#define GLFUNC(__type, __name)	__name = (__type)GLCanvas_GetProcAddress(STRINGIFY(__name));
 #include "Common/GLInclude/glFunctions.h"
 #undef GLFUNC
 }
-#elif defined(__ANDROID__)
-#include <dlfcn.h>
-
-// Android has no GLX, so everything is resolved through EGL. Cemu's GL renderer
-// needs desktop OpenGL, which Android does not have - Vulkan is the renderer
-// there - but the imports still have to resolve for the build.
-void LoadOpenGLImports()
-{
-	void* libEGL = dlopen("libEGL.so", RTLD_NOW | RTLD_GLOBAL);
-	auto _eglGetProcAddress = (GL_IMPORT(*)(const char*))(libEGL ? dlsym(libEGL, "eglGetProcAddress") : nullptr);
-
-#define GLFUNC(__type, __name)	__name = (__type)(_eglGetProcAddress ? _eglGetProcAddress(STRINGIFY(__name)) : nullptr);
-#define EGLFUNC(__type, __name)	__name = (__type)(libEGL ? dlsym(libEGL, STRINGIFY(__name)) : nullptr);
-#include "Common/GLInclude/glFunctions.h"
-#undef GLFUNC
-#undef EGLFUNC
-}
-
-#elif BOOST_OS_LINUX || BOOST_OS_BSD
-GL_IMPORT _GetOpenGLFunction(void* hLib, PFNGLXGETPROCADDRESSPROC func, const char* name)
-{
-	GL_IMPORT r = (GL_IMPORT)func((const GLubyte*)name);
-	return r;
-}
-
-#include <dlfcn.h>
-// #define RTLD_NOW        	0x00002
-// #define RTLD_GLOBAL        	0x00100
-
-void LoadOpenGLImports()
-{
-	PFNGLXGETPROCADDRESSPROC _glXGetProcAddress = nullptr;
-	void* libGL = dlopen("libGL.so.1", RTLD_NOW | RTLD_GLOBAL);
-	_glXGetProcAddress = (PFNGLXGETPROCADDRESSPROC)dlsym(libGL, "glXGetProcAddressARB");
-	if(!_glXGetProcAddress)
-	{
-		libGL = dlopen("libGL.so", RTLD_NOW | RTLD_GLOBAL);
-		_glXGetProcAddress = (PFNGLXGETPROCADDRESSPROC)dlsym(libGL, "glXGetProcAddressARB");
-	}
-
-	void* libEGL = dlopen("libEGL.so.1", RTLD_NOW | RTLD_GLOBAL);
-	if(!libEGL)
-	{
-		libGL = dlopen("libEGL.so", RTLD_NOW | RTLD_GLOBAL);
-	}
-
-#define GLFUNC(__type, __name)	__name = (__type)_GetOpenGLFunction(libGL, _glXGetProcAddress, STRINGIFY(__name));
-#define EGLFUNC(__type, __name)	__name = (__type)dlsym(libEGL, STRINGIFY(__name));
-#include "Common/GLInclude/glFunctions.h"
-#undef GLFUNC
-#undef EGLFUNC
-}
-
-#if BOOST_OS_LINUX || BOOST_OS_BSD
-// dummy function for all code that is statically linked with cemu and attempts to use eglSwapInterval
-// used to suppress wxWidgets calls to eglSwapInterval
-extern "C"
-EGLAPI EGLBoolean EGLAPIENTRY eglSwapInterval(EGLDisplay dpy, EGLint interval)
-{
-	return EGL_TRUE;
-}
-#endif
-
-#elif BOOST_OS_MACOS
-void LoadOpenGLImports()
-{
-	cemu_assert_unimplemented();
-}
-#endif
 
 void OpenGLRenderer::Initialize()
 {
@@ -338,11 +267,6 @@ void OpenGLRenderer::Initialize()
 	}
 	// sRGB S3TC formats require both extensions
 	m_supportsS3TCSRGB |= m_supportsS3TC && supportsTextureSRGB;
-
-#if BOOST_OS_WINDOWS
-	if (wglSwapIntervalEXT)
-		wglSwapIntervalEXT(0); // disable V-Sync per default
-#endif
 
 	if (glMaxShaderCompilerThreadsARB)
 		glMaxShaderCompilerThreadsARB(0xFFFFFFFF);
@@ -815,8 +739,10 @@ void OpenGLRenderer::rendertarget_deleteCachedFBO(LatteCachedFBO* cfbo)
 
 // set active FBO
 
-// In libretro, FBO 0 has no drawable surface (shared context).
-// We create our own FBO with a color renderbuffer to serve as the "backbuffer".
+// In libretro, FBO 0 is not the core's to draw into: the frontend hands over
+// its own framebuffer (get_current_framebuffer), and retro_run blits the frame
+// there. We create our own FBO with a color renderbuffer to serve as the
+// "backbuffer".
 // The renderbuffer entry points come from glFunctions.h like every other modern
 // GL function; declaring them here as real symbols only linked on Linux, where
 // libGL exports them - opengl32.dll does not.
@@ -825,9 +751,19 @@ static GLuint s_libretro_rbo = 0;
 static int s_libretro_fbo_w = 0;
 static int s_libretro_fbo_h = 0;
 
-GLuint libretro_getBackbufferRBO()
+// With the renderer, whose context they belong to. The core stays loaded from
+// one content to the next and the next context has none of these names, so
+// they must not outlive it either.
+static void libretro_releaseBackbuffer()
 {
-	return s_libretro_rbo;
+	if (s_libretro_fbo)
+		glDeleteFramebuffers(1, &s_libretro_fbo);
+	if (s_libretro_rbo)
+		glDeleteRenderbuffers(1, &s_libretro_rbo);
+	s_libretro_fbo = 0;
+	s_libretro_rbo = 0;
+	s_libretro_fbo_w = 0;
+	s_libretro_fbo_h = 0;
 }
 
 GLuint libretro_getBackbufferFBO(int width, int height)

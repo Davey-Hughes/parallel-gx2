@@ -199,7 +199,7 @@ uint32 LatteCP_readU32Deprc()
 		// still no command data available, do some other tasks
 		LatteTiming_HandleTimedVsync();
 		LatteAsyncCommands_checkAndExecute();
-		std::this_thread::yield();
+		Latte_GpuYield(LatteGpuYield::Idle); // a cothread hands the frontend's thread back
 		performanceMonitor.gpuTime_idleTime.endMeasuring();
 	}
 	UNREACHABLE;
@@ -555,6 +555,10 @@ LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
 			// check if any GPU events happened
 			LatteTiming_HandleTimedVsync();
 			LatteAsyncCommands_checkAndExecute();
+			// A thread of its own spins here; a cothread spinning would be
+			// holding the frontend's thread until the emulated CPU writes.
+			if (Latte_IsOnGpuCothread())
+				Latte_GpuYield(LatteGpuYield::Wait);
 		}
 		performanceMonitor.gpuTime_fenceTime.endMeasuring();
 	}
@@ -661,7 +665,9 @@ LatteCMDPtr LatteCP_itMemSemaphore(LatteCMDPtr cmd, uint32 nWords)
 			if (oldVal == 0)
 			{
 				loopCount++;
-				if (loopCount > 2000)
+				if (Latte_IsOnGpuCothread())
+					Latte_GpuYield(LatteGpuYield::Wait);
+				else if (loopCount > 2000)
 					std::this_thread::yield();
 				// Signalled by the emulated CPU, so a stopping title means it
 				// never will be.
@@ -1003,7 +1009,7 @@ LatteCMDPtr LatteCP_itHLEWaitForFlip(LatteCMDPtr cmd, uint32 nWords)
 			LatteThread_Exit();
 		// check if any GPU events happened
 		LatteTiming_HandleTimedVsync();
-		std::this_thread::yield();
+		Latte_GpuYield(LatteGpuYield::Wait);
 	}
 	return cmd;
 }

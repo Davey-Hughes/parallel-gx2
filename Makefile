@@ -107,11 +107,9 @@ ifneq (,$(filter unix webos,$(platform)))
       FLAGS += -DWEBOS
       HAVE_LIBUSB := 0
    else
-      # EGL alone: GL's functions are loaded by the renderer, and GLX's and
-      # Xlib's are found at run time (CemuLibretro.cpp), so the core loads
-      # without X11
+      # No GL, EGL, GLX or X11 library: the context is the frontend's, and so
+      # is every GL entry point (libretro's get_proc_address)
       HAVE_OPENGL := 1
-      LIBS += -lEGL
    endif
    ifeq ($(LINK_STATIC_LIBCPLUSPLUS),1)
       LDFLAGS += -static-libgcc -static-libstdc++
@@ -201,7 +199,7 @@ else
    FLAGS  += -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -DWIN32_LEAN_AND_MEAN
    HAVE_OPENGL := 1
    LDFLAGS += -static-libgcc -static-libstdc++ -static
-   LIBS += -lopengl32 -ldbghelp -lgdi32 -lntdll -lpsapi -liphlpapi -lws2_32 -lbcrypt \
+   LIBS += -ldbghelp -lgdi32 -lntdll -lpsapi -liphlpapi -lws2_32 -lbcrypt \
 	-ladvapi32 -lsetupapi -lole32 -luuid -lshell32 -luser32 -lkernel32 -lwinpthread
 endif
 

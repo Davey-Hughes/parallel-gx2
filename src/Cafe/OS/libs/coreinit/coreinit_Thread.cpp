@@ -2,6 +2,7 @@
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
+#include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
 #include "Cafe/OS/libs/snd_core/ax.h"
@@ -1708,6 +1709,23 @@ namespace coreinit
 			}
 		});
 
+		// Under OpenGL the GPU is a cothread of this very thread (Latte.h), so
+		// a join here would also stop the GPU - and a guest thread that polls
+		// the GPU rather than sleeping on it would then never come back to the
+		// scheduler to see the stop. Upstream ends the scheduler with the GPU
+		// still serving; this keeps it serving, by running it, until the cores
+		// have left.
+		if (Latte_IsGpuCothread())
+		{
+			auto anyCoreAlive = [] {
+				for (auto& alive : sSchedulerHostAlive)
+					if (alive.load(std::memory_order_relaxed) != 0)
+						return true;
+				return false;
+			};
+			while (anyCoreAlive() && Latte_IsGpuCothread())
+				Latte_ServeGpu();
+		}
 		for (size_t idx = 0; idx < sSchedulerThreads.size(); idx++)
 		{
 			cemuLog_log(LogType::Force,

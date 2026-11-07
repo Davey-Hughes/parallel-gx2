@@ -18,6 +18,12 @@ class OpenGLCanvasCallbacks
 		return false;
 	}
 	virtual void SwapBuffers(bool swapTV, bool swapDRC) {}
+	// Every GL entry point the renderer uses comes from here: the context is
+	// the frontend's, and so is the loader that goes with it.
+	virtual void* GetProcAddress(const char* name) const
+	{
+		return nullptr;
+	}
 	virtual GLuint GetOutputFramebuffer() const
 	{
 		return 0; // Default: render to FBO 0 (window backbuffer)
@@ -47,6 +53,7 @@ void ClearOpenGLCanvasCallbacks();
 bool GLCanvas_HasPadViewOpen();
 bool GLCanvas_MakeCurrent(bool padView);
 void GLCanvas_SwapBuffers(bool swapTV, bool swapDRC);
+void* GLCanvas_GetProcAddress(const char* name);
 GLuint GLCanvas_GetOutputFramebuffer();
 bool GLCanvas_ShouldRenderScreen(bool padView);
 void GLCanvas_AdjustScreenViewport(bool padView, sint32 windowWidth, sint32 windowHeight,

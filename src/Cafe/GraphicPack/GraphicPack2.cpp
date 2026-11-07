@@ -8,6 +8,7 @@
 #include "util/helpers/StringHelpers.h"
 #include "util/IniParser/IniParser.h"
 #include "Cafe/CafeSystem.h"
+#include "Cafe/HW/Latte/Core/LatteGpuCothread.h"
 #include "HW/Espresso/Debugger/Debugger.h"
 #include "Cafe/HW/Latte/Core/LatteTiming.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
@@ -251,7 +252,14 @@ void GraphicPack2::ClearGraphicPacks()
 void GraphicPack2::WaitUntilReady()
 {
 	while (!s_isReady)
-		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	{
+		// A GPU on a cothread waits by handing the frontend's thread back: that
+		// thread is the one that activates the packs (LatteGpuCothread.h)
+		if (Latte_IsOnGpuCothread())
+			Latte_GpuYield(LatteGpuYield::Idle);
+		else
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
 }
 
 std::unordered_map<std::string, GraphicPack2::PresetVar> GraphicPack2::ParsePresetVars(IniParser& rules) const

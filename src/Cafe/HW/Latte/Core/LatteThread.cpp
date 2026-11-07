@@ -1,5 +1,6 @@
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 #ifdef _WIN32
 #include <process.h> // _endthreadex
 #endif
@@ -55,8 +56,9 @@ static std::atomic_bool sLatteThreadAlive{false};
 //
 // So the teardown is asked for here and carried out by the GPU thread at the
 // pause gate rather than by the caller. Not a detail: under OpenGL the objects
-// belong to that thread's context and no other thread can free them, and under
-// either API it is the thread that might otherwise still be using them.
+// belong to a context that is current only while the GPU runs (it is a cothread
+// of the frontend's thread, LatteGpuCothread.h), and under either API it is the
+// thread that might otherwise still be using them.
 static std::atomic_bool sTeardownForContextLoss{false};
 static std::atomic_bool sTeardownForContextLossDone{false};
 // Set for as long as there is deliberately no renderer. Without it the GPU
@@ -152,6 +154,7 @@ static std::atomic_bool sRendererStateInitialized{false};
 static std::mutex sGpuPauseMutex;
 static std::condition_variable sGpuPauseCv;
 
+
 void Latte_RequestGpuPause()
 {
 	sGpuPauseRequested.store(true, std::memory_order_release);
@@ -228,6 +231,16 @@ void Latte_GpuPauseGate()
 	}
 	while (true)
 	{
+		if (Latte_IsOnGpuCothread())
+		{
+			// Parked is the frontend's thread getting on with something else
+			// and coming back now and then to see whether that has changed.
+			sGpuParked.store(true, std::memory_order_release);
+			while (sGpuPauseRequested.load(std::memory_order_acquire) && !Latte_GetStopSignal())
+				Latte_GpuYield(LatteGpuYield::Parked);
+			sGpuParked.store(false, std::memory_order_release);
+		}
+		else
 		{
 			std::unique_lock<std::mutex> lock(sGpuPauseMutex);
 			sGpuParked.store(true, std::memory_order_release);
@@ -245,7 +258,10 @@ void Latte_GpuPauseGate()
 		// No renderer yet and no stop: the frontend has taken its context away
 		// and has not given one back. Nothing this thread does next is possible
 		// without one, so it waits here rather than out there.
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		if (Latte_IsOnGpuCothread())
+			Latte_GpuYield(LatteGpuYield::Parked);
+		else
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	sGpuAtPauseGate.store(false, std::memory_order_release);
 
@@ -356,7 +372,8 @@ void LatteThread_HandleOSScreen()
 
 int Latte_ThreadEntry()
 {
-	SetThreadName("LatteThread");
+	if (!Latte_IsOnGpuCothread()) // a cothread would be renaming the frontend's thread
+		SetThreadName("LatteThread");
 	// renderer
 	LatteThread_SetPhase("renderer init");
 	Latte_InitRendererState();
@@ -377,7 +394,10 @@ int Latte_ThreadEntry()
 		g_renderer->DrawEmptyFrame(true);
 		g_renderer->DrawEmptyFrame(false);
 		g_renderer->CancelScreenshotRequest(); // keep the screenshot request queue empty
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000/60));
+		if (Latte_IsOnGpuCothread())
+			Latte_GpuYield(LatteGpuYield::Idle);
+		else
+			std::this_thread::sleep_for(std::chrono::milliseconds(1000/60));
 	}
 
 	g_renderer->DrawEmptyFrame(true);
@@ -422,19 +442,33 @@ int Latte_ThreadEntry()
 	cemuLog_log(LogType::Force, "LatteThread: GPU init finished, waiting for GX2Init...");
 	{
 		LatteThread_SetPhase("waiting for GX2Init");
-		int waitCount = 0;
+		const auto waitStart = std::chrono::steady_clock::now();
+		int loggedAfter = 0; // seconds
 		while (LatteGPUState.gx2InitCalled == 0)
 		{
-			std::this_thread::yield();
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			if (Latte_IsOnGpuCothread())
+				Latte_GpuYield(LatteGpuYield::Idle);
+			else
+			{
+				std::this_thread::yield();
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			}
 			LatteThread_HandleOSScreen();
 			if (Latte_GetStopSignal())
 				LatteThread_Exit();
-			waitCount++;
-			if (waitCount == 5000) // 5 seconds
+			// By the clock, not by passes: on a cothread a pass is a trip to the
+			// frontend's thread and back rather than a millisecond.
+			const auto waited = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - waitStart).count();
+			if (waited >= 5 && loggedAfter < 5)
+			{
+				loggedAfter = 5;
 				cemuLog_log(LogType::Force, "LatteThread: Still waiting for GX2Init after 5s...");
-			if (waitCount == 30000) // 30 seconds
+			}
+			if (waited >= 30 && loggedAfter < 30)
+			{
+				loggedAfter = 30;
 				cemuLog_log(LogType::Force, "LatteThread: Still waiting for GX2Init after 30s...");
+			}
 		}
 	}
 	cemuLog_log(LogType::Force, "LatteThread: GX2Init called, entering command processor");
@@ -448,9 +482,9 @@ int Latte_ThreadEntry()
 // the same work at the end of LatteThread_Exit; what this adds is an order,
 // because a core has to survive the run afterwards.
 //
-// Runs on: the GPU thread, and only ever that one. Under OpenGL these objects
-// belong to its context and no other thread may free them; under Vulkan it is
-// still the thread that would otherwise be using them.
+// Runs on: the GPU thread, and only ever that one - under OpenGL a cothread
+// of the frontend's thread, run while the frontend's context is current; under
+// Vulkan the thread that would otherwise be using these objects.
 //
 // The order is "every thread that works through the renderer is gone before the
 // renderer is":
@@ -574,6 +608,13 @@ void Latte_InitRendererState()
 }
 
 std::thread sLatteThread;
+
+static void Latte_GpuCothreadEntry()
+{
+	Latte_ThreadEntry(); // leaves through LatteThread_Exit, never by returning
+	cemu_assert_unimplemented();
+	LatteGpuCothread_Exit();
+}
 std::mutex sLatteThreadStateMutex;
 
 // initializes GPU thread which in turn also activates graphic packs
@@ -585,6 +626,24 @@ void Latte_Start()
 	sLatteThreadRunning = true;
 	sLatteThreadFinishedInit = false;
 	sLatteThreadAlive.store(true, std::memory_order_release);
+	// OpenGL draws through the frontend's context, so its GPU runs on the
+	// frontend's thread (LatteGpuCothread.h); this is that thread, starting
+	// the title.
+	if (g_renderer && g_renderer->GetType() == RendererAPI::OpenGL)
+	{
+		if (!LatteGpuCothread_Start(Latte_GpuCothreadEntry))
+		{
+			cemuLog_log(LogType::Force, "[LatteThread] could not create the GPU cothread");
+			sLatteThreadAlive.store(false, std::memory_order_release);
+			sLatteThreadRunning = false;
+			return;
+		}
+		// Init is the first thing it does, then it waits for the title - the
+		// first time it waits is the first time this gets its thread back.
+		while (!sLatteThreadFinishedInit && Latte_RunGpu() != LatteGpuYield::Finished)
+			;
+		return;
+	}
 	sLatteThread = std::thread(Latte_ThreadEntry);
 	// wait until initialized
 	while (!sLatteThreadFinishedInit)
@@ -615,6 +674,22 @@ void Latte_Stop()
 		std::lock_guard<std::mutex> lock(sGpuPauseMutex);
 	}
 	sGpuPauseCv.notify_all();
+	if (LatteGpuCothread_Exists())
+	{
+		// The same wait, the cothread way: run it until it has seen the stop
+		// and left. Every loop it waits in asks for the stop first.
+		if (!LatteGpuCothread_IsOwnerThread())
+		{
+			// Only the frontend's thread can run it, so from anywhere else
+			// this would wait for good. Said, and left to that thread.
+			cemuLog_log(LogType::Force, "[LatteThread] Latte_Stop off the frontend's thread with the GPU on a cothread - not waiting for it");
+			return;
+		}
+		while (Latte_RunGpu() != LatteGpuYield::Finished)
+			;
+		LatteGpuCothread_Delete();
+		return;
+	}
 	// Nothing else: this is a wait for a thread to end, and join is how that is
 	// spelled. A bounded version of it lived here for a while, with the process
 	// ended on the timeout; what it was really guarding against was the thread
@@ -667,6 +742,7 @@ void Latte_JoinGpuThreadIfLeft()
 	std::unique_lock _lock(sLatteThreadStateMutex);
 	if (sLatteThread.joinable())
 		sLatteThread.join();
+	LatteGpuCothread_Delete();
 }
 
 void LatteThread_Exit()
@@ -689,6 +765,8 @@ void LatteThread_Exit()
 	Latte_TeardownGpuState("the title is stopping");
 	// reset GPU7 state
 	std::memset(&LatteGPUState, 0, sizeof(LatteGPUState));
+	if (Latte_IsOnGpuCothread())
+		LatteGpuCothread_Exit();
 	#if BOOST_OS_WINDOWS
 	// _endthreadex, not ExitThread: this is a std::thread, started by the C
 	// runtime, which took a reference to the module holding the thread's code

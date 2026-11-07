@@ -127,6 +127,7 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteBufferData.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteGSCopyShaderParser.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteGpuCothread.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteIndices.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteOverlay.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LattePerformanceMonitor.cpp \
@@ -593,8 +594,18 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/utils/md5.c \
 	$(LRC_DIR)/vfs/vfs_implementation.c
 LRC_FLAGS := -I$(LRC_DIR)/include -DHAVE_SSL -DHAVE_RETROSSL -DHAVE_CRYPTO -DHAVE_THREADS
-ifeq ($(OS_ANDROID),1)
-   LRC_SOURCES_C += $(LRC_DIR)/libco/libco.c
+# libco: Android's fibers (FiberAndroid.cpp), and the OpenGL GPU, which runs as
+# a cothread of the frontend's thread because the frontend's context is current
+# there and nowhere else (LatteThread.cpp). Per-thread state (LIBCO_MP): more
+# than one thread switches cothreads. Windows gets its own fibers, as libco.c
+# only picks those for MSVC.
+ifneq (,$(filter 1,$(OS_ANDROID) $(HAVE_OPENGL)))
+   LRC_FLAGS += -DLIBCO_MP
+   ifeq ($(OS_WIN),1)
+      LRC_SOURCES_C += $(LRC_DIR)/libco/fiber.c
+   else
+      LRC_SOURCES_C += $(LRC_DIR)/libco/libco.c
+   endif
 endif
 
 # ----------------------------------------------------------------------------

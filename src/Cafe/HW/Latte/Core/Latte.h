@@ -214,3 +214,5 @@ void Latte_GpuPauseGate(); // GPU thread only - called by the command processor
 const char* Latte_GetThreadPhase(); // where that thread was when it was asked to stop
 void Latte_JoinGpuThreadIfLeft(); // waits for a GPU thread that left on its own
 void LatteThread_Exit();
+
+#include "Cafe/HW/Latte/Core/LatteGpuCothread.h"

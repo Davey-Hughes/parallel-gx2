@@ -4,6 +4,8 @@ What changed in the libretro core of this fork, newest first. Changes that come 
 
 ## Unreleased
 
+- OpenGL goes through the frontend alone: the core no longer makes GL contexts of its own (WGL on Windows, GLX on X11, EGL on Wayland), links no GL, EGL or X11 library, and loads every GL function from RetroArch. Cemu's GPU thread runs as a cothread on RetroArch's thread, where its context is current, and the finished frame is blitted into RetroArch's framebuffer instead of read back into memory and uploaded again each frame. Wayland no longer has an OpenGL path of its own.
+- Android: the fibers the emulated cores run on keep libco's state per thread (`LIBCO_MP`); without it a switch on one core could save its registers into another core's fiber.
 - The core is now ParaLLEl GX2, `parallel_gx2_libretro`. RetroArch keeps core options, remaps and overrides under the core's name, so they start from the defaults: to keep them, copy RetroArch's `config/Cemu/` to `config/ParaLLEl GX2/` and rename the files in it from `Cemu.*` to `ParaLLEl GX2.*`. The core's own files stay in `<system>/Cemu/` and `<save>/Cemu/`.
 - Online play (Nintendo Network, Pretendo, SpotPass, Miiverse) goes through the HTTP and TLS client RetroArch's libretro-common has, in place of libcurl and OpenSSL: the client certificates and the RSA/AES-256-CBC suite the console's services ask for included.
 - Linux: content loaded a second time in the same RetroArch, after closing it, no longer crashes RetroArch. The core's OpenSSL read the system's `openssl.cnf`, which loads the pkcs11 engine on many distributions; that system library stays loaded when the core is unloaded and kept pointers into the first copy of the core, so the second load crashed in it. The core no longer has OpenSSL at all.
