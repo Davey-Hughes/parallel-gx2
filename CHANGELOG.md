@@ -4,6 +4,11 @@ What changed in the libretro core of this fork, newest first. Changes that come 
 
 ## Unreleased
 
+- Boot no longer waits up to three seconds for the CPU timer's calibration: a first estimate is ready 25 ms after the core loads and is refined in the background.
+- The recompiler starts on a newly run function at once instead of at its next 10 ms look, so hot code spends less time interpreted, and its work queue no longer allocates.
+- Vulkan: loading the pipeline cache no longer pauses 10 ms whenever 50 pipelines are queued, which held a warm cache to 5,000 pipelines a second; closing content no longer waits up to 250 ms for the pipeline cache's save thread.
+- Audio goes to RetroArch straight out of the ring buffer, and AX's channels are converted straight into it: no copies on the way, and no 192 KiB flush buffer.
+- The frame gate and the frame handoff between the GPU thread and `retro_run` take no locks.
 - OpenGL goes through the frontend alone: the core no longer makes GL contexts of its own (WGL on Windows, GLX on X11, EGL on Wayland), links no GL, EGL or X11 library, and loads every GL function from RetroArch. Cemu's GPU thread runs as a cothread on RetroArch's thread, where its context is current, and the finished frame is blitted into RetroArch's framebuffer instead of read back into memory and uploaded again each frame. Wayland no longer has an OpenGL path of its own.
 - Android: the fibers the emulated cores run on keep libco's state per thread (`LIBCO_MP`); without it a switch on one core could save its registers into another core's fiber.
 - The core is now ParaLLEl GX2, `parallel_gx2_libretro`. RetroArch keeps core options, remaps and overrides under the core's name, so they start from the defaults: to keep them, copy RetroArch's `config/Cemu/` to `config/ParaLLEl GX2/` and rename the files in it from `Cemu.*` to `ParaLLEl GX2.*`. The core's own files stay in `<system>/Cemu/` and `<save>/Cemu/`.

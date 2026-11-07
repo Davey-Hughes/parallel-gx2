@@ -4,13 +4,22 @@
 #include "util/highresolutiontimer/HighResolutionTimer.h"
 #include "Common/cpu_features.h"
 
+#include <atomic>
+#include <thread>
+#include <rthreads/retro_eventcount.h>
+
 #if defined(ARCH_X86_64)
 #include <immintrin.h>
 #pragma intrinsic(__rdtsc)
 #endif
 
 uint64 _rdtscLastMeasure = 0;
-uint64 _rdtscFrequency = 0;
+// Published by the calibration thread, first after 25 ms and then twice more
+// as it gets better (PPCTimer_initThread); read under sTimerSpinlock
+static std::atomic<uint64> _rdtscFrequency{0};
+// The title start waits on this for the first estimate (PPCTimer_waitForInit)
+static retro_eventcount_t sTimerReady{};
+static bool sTimerReadyOk = false;
 
 struct uint128_t
 {
@@ -31,7 +40,18 @@ uint64 muldiv64(uint64 a, uint64 b, uint64 d)
 	return diva * b + moda * divb + moda * modb / d;
 }
 
-uint64 PPCTimer_estimateRDTSCFrequency()
+// The TSC's rate, measured against the high resolution timer. Upstream
+// measured once, for three seconds, and the title start waited for it - three
+// seconds off every boot that came sooner than that after the core was loaded,
+// which in RetroArch is every boot. The two clocks are read back to back, so
+// the error is the gap between those reads (well under a microsecond) over the
+// time measured: 25 ms is already good to about one part in 10^5. So the first
+// estimate is published after 25 ms, and the same measurement, still running,
+// replaces it at 200 ms and at 3 s with the one upstream would have had. The
+// rate is only ever a divisor of elapsed TSC ticks (PPCTimer_getFromRDTSC), so
+// a refined one changes how fast guest time runs by that one part in 10^5 from
+// then on, and moves no time already counted.
+int PPCTimer_initThread()
 {
     #if defined(ARCH_X86_64)
 	if (!g_CPUFeatures.x86.invariant_tsc)
@@ -39,44 +59,33 @@ uint64 PPCTimer_estimateRDTSCFrequency()
     #endif
 
 	_mm_mfence();
-	uint64 tscStart = __rdtsc();
-	unsigned int startTime = GetTickCount();
-	HRTick startTick = HighResolutionTimer::now().getTick();
-	// wait roughly 3 seconds
-	while (true)
+	const uint64 tscStart = __rdtsc();
+	const HRTick startTick = HighResolutionTimer::now().getTick();
+	const auto start = std::chrono::steady_clock::now();
+	for (const int ms : { 25, 200, 3000 })
 	{
-		if ((GetTickCount() - startTime) >= 3000)
-			break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		std::this_thread::sleep_until(start + std::chrono::milliseconds(ms));
+		_mm_mfence();
+		const HRTick stopTick = HighResolutionTimer::now().getTick();
+		const uint64 tscEnd = __rdtsc();
+		uint64 hrtFreq = 0;
+		const uint64 hrtDiff = HighResolutionTimer::getTimeDiffEx(startTick, stopTick, hrtFreq);
+		if (hrtDiff == 0)
+			continue;
+		const uint64 tscFreq = muldiv64(tscEnd - tscStart, hrtFreq, hrtDiff);
+		if (tscFreq == 0)
+			continue;
+		_rdtscFrequency.store(tscFreq, std::memory_order_release);
+		if (sTimerReadyOk)
+			retro_eventcount_notify(&sTimerReady);
 	}
-	_mm_mfence();
-	HRTick stopTick = HighResolutionTimer::now().getTick();
-	uint64 tscEnd = __rdtsc();
-	// derive frequency approximation from measured time difference
-	uint64 tsc_diff = tscEnd - tscStart;
-	uint64 hrtFreq = 0;
-	uint64 hrtDiff = HighResolutionTimer::getTimeDiffEx(startTick, stopTick, hrtFreq);
-	uint64 tsc_freq = muldiv64(tsc_diff, hrtFreq, hrtDiff);
-
-	// uint64 freqMultiplier = tsc_freq / hrtFreq;
-	//cemuLog_log(LogType::Force, "RDTSC measurement test:");
-	//cemuLog_log(LogType::Force, "TSC-diff:   0x{:016x}", tsc_diff);
-	//cemuLog_log(LogType::Force, "TSC-freq:   0x{:016x}", tsc_freq);
-	//cemuLog_log(LogType::Force, "HPC-diff:   0x{:016x}", qpc_diff);
-	//cemuLog_log(LogType::Force, "HPC-freq:   0x{:016x}", (uint64)qpc_freq.QuadPart);
-	//cemuLog_log(LogType::Force, "Multiplier: 0x{:016x}", freqMultiplier);
-
-	return tsc_freq;
-}
-
-int PPCTimer_initThread()
-{
-	_rdtscFrequency = PPCTimer_estimateRDTSCFrequency();
 	return 0;
 }
 
 void PPCTimer_init()
 {
+	if (!sTimerReadyOk)
+		sTimerReadyOk = retro_eventcount_init(&sTimerReady);
 	std::thread t(PPCTimer_initThread);
 	t.detach();
 	_rdtscLastMeasure = __rdtsc();
@@ -97,7 +106,7 @@ uint64 PPCTimer_getRawTsc()
 
 uint64 PPCTimer_microsecondsToTsc(uint64 us)
 {
-	return (us * _rdtscFrequency) / 1000000ULL;
+	return (us * _rdtscFrequency.load(std::memory_order_relaxed)) / 1000000ULL;
 }
 
 uint64 PPCTimer_tscToMicroseconds(uint64 us)
@@ -106,19 +115,34 @@ uint64 PPCTimer_tscToMicroseconds(uint64 us)
 	r.low = _umul128(us, 1000000ULL, &r.high);
 
 	uint64 remainder;
-	const uint64 microseconds = _udiv128(r.high, r.low, _rdtscFrequency, &remainder);
+	const uint64 microseconds = _udiv128(r.high, r.low, _rdtscFrequency.load(std::memory_order_relaxed), &remainder);
 
 	return microseconds;
 }
 
 bool PPCTimer_isReady()
 {
-	return _rdtscFrequency != 0;
+	return _rdtscFrequency.load(std::memory_order_acquire) != 0;
 }
 
 void PPCTimer_waitForInit()
 {
-	while (!PPCTimer_isReady()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	// Asleep until the first estimate, 25 ms after PPCTimer_init at most
+	while (!PPCTimer_isReady())
+	{
+		if (!sTimerReadyOk)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			continue;
+		}
+		const int key = retro_eventcount_prepare_wait(&sTimerReady);
+		if (PPCTimer_isReady())
+		{
+			retro_eventcount_cancel_wait(&sTimerReady);
+			break;
+		}
+		retro_eventcount_commit_wait(&sTimerReady, key);
+	}
 }
 
 FSpinlock sTimerSpinlock;
@@ -150,7 +174,7 @@ uint64 PPCTimer_getFromRDTSC()
 	#endif
 
 	uint64 remainder;
-	uint64 elapsedTick = _udiv128(_rdtscAcc.high, _rdtscAcc.low, _rdtscFrequency, &remainder);
+	uint64 elapsedTick = _udiv128(_rdtscAcc.high, _rdtscAcc.low, _rdtscFrequency.load(std::memory_order_relaxed), &remainder);
 
 	_rdtscAcc.low = remainder;
 	_rdtscAcc.high = 0;

@@ -1,6 +1,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 #ifdef _WIN32
 #include <process.h> // _endthreadex
 #endif
@@ -158,6 +159,7 @@ static std::condition_variable sGpuPauseCv;
 void Latte_RequestGpuPause()
 {
 	sGpuPauseRequested.store(true, std::memory_order_release);
+	LatteGpuWake_Notify(); // out of any LatteGpuWake_WaitUntil, to the gate
 }
 
 void Latte_ReleaseGpuPause()
@@ -664,6 +666,7 @@ void Latte_Stop()
 	}
 	sLatteThreadRunning = false;
 	_lock.unlock();
+	LatteGpuWake_Notify();
 	// The one thing upstream's stop does not cover. A thread parked at the
 	// pause gate is asleep on a condition variable whose predicate does check
 	// the stop signal - but only when something wakes it, and nothing did. A

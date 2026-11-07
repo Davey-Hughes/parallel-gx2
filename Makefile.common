@@ -116,6 +116,7 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/IML/IMLRegisterAllocatorRanges.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/IML/IMLSegment.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/PPCRecompiler.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/PPCRecompilerWorkQueue.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/PPCRecompilerImlGen.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/PPCRecompilerImlGenFPU.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/PPCRecompilerIntermediate.cpp \
@@ -128,6 +129,7 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteGSCopyShaderParser.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteGpuCothread.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteGpuWake.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteIndices.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LatteOverlay.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Core/LattePerformanceMonitor.cpp \
@@ -585,6 +587,7 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/net/net_http.c \
 	$(LRC_DIR)/net/net_socket.c \
 	$(LRC_DIR)/net/net_socket_ssl_retro.c \
+	$(LRC_DIR)/queues/retro_spsc.c \
 	$(LRC_DIR)/rthreads/retro_eventcount.c \
 	$(LRC_DIR)/rthreads/rthreads.c \
 	$(LRC_DIR)/streams/file_stream.c \

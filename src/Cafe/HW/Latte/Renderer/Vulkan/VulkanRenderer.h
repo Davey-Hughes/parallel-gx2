@@ -1,5 +1,7 @@
 #pragma once
 
+#include <rthreads/retro_eventcount.h>
+
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.h"
@@ -623,6 +625,11 @@ private:
 	Semaphore m_pipeline_cache_semaphore;
 	std::shared_mutex m_pipeline_cache_save_mutex;
 	std::thread m_pipeline_cache_save_thread;
+	// Wakes the save thread out of its 15 s wait when the renderer goes away,
+	// instead of it noticing at its next 250 ms look
+	retro_eventcount_t m_pipeline_cache_wake{};
+	bool m_pipeline_cache_wake_ok = false;
+	bool PipelineCacheSaveWait(std::chrono::milliseconds duration);
 	VkPipelineCache m_pipeline_cache{ nullptr };
 	std::unordered_map<uint64, VkPipeline> m_backbufferBlitPipelineCache;
 	std::unordered_map<uint64, VkDescriptorSet> m_backbufferBlitDescriptorSetCache;

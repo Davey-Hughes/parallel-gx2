@@ -187,3 +187,20 @@ test-gpu-cothread:
     - ./test/gpu_cothread/run_tests.sh
     - make -C test/gpu_cothread clean
     - SANITIZER=address,undefined ./test/gpu_cothread/run_tests.sh
+
+# The lock-free handoffs between the core's threads: the recompiler's work
+# queue, the GPU thread's wake, the audio ring.
+test-handoff:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+    CC: gcc-12
+    CXX: g++-12
+  script:
+    - ./test/handoff/run_tests.sh
+    - make -C test/handoff clean
+    - SANITIZER=thread ./test/handoff/run_tests.sh
+    - make -C test/handoff clean
+    - SANITIZER=address,undefined ./test/handoff/run_tests.sh

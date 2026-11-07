@@ -91,6 +91,16 @@ jobs:
           make -C test/gpu_cothread clean
           SANITIZER=address,undefined ./test/gpu_cothread/run_tests.sh
 
+      - name: "Thread handoffs"
+        # the recompiler's work queue, the GPU thread's wake, the audio
+        # ring: plain, under ThreadSanitizer, under ASan + UBSan
+        run: |
+          ./test/handoff/run_tests.sh
+          make -C test/handoff clean
+          SANITIZER=thread ./test/handoff/run_tests.sh
+          make -C test/handoff clean
+          SANITIZER=address,undefined ./test/handoff/run_tests.sh
+
   macos:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'macos')
     name: macos-${{ matrix.arch }}

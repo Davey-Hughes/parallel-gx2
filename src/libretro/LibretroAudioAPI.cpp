@@ -28,12 +28,10 @@ LibretroAudioRingBuffer LibretroAudioAPI::s_ring_buffer;
 std::atomic_bool LibretroAudioAPI::s_thread_mode{false};
 LibretroAudioAPI::MultiAudioCallback LibretroAudioAPI::s_multi_callback = nullptr;
 unsigned LibretroAudioAPI::s_out_channels = 2;
-std::vector<int16_t> LibretroAudioAPI::s_flush_buffer;
 
 LibretroAudioAPI::LibretroAudioAPI(uint32 samplerate, uint32 channels, uint32 samples_per_block, uint32 bits_per_sample)
 	: IAudioAPI(samplerate, channels, samples_per_block, bits_per_sample)
 {
-	s_flush_buffer.resize(LibretroAudioRingBuffer::kBufferSamples);
 	s_ring_buffer.Reset();
 }
 
@@ -41,8 +39,6 @@ LibretroAudioAPI::~LibretroAudioAPI()
 {
 	m_playing = false;
 	s_ring_buffer.Reset();
-	s_flush_buffer.clear();
-	s_flush_buffer.shrink_to_fit();
 }
 
 bool LibretroAudioAPI::NeedAdditionalBlocks() const
@@ -61,41 +57,53 @@ bool LibretroAudioAPI::FeedBlock(sint16* data)
 		return false;
 
 	// AX's channels (the TV mode: 1, 2 or 6) to the output's (2 or 6). 5.1
-	// is FL FR C LFE SL SR, as standalone hands it to cubeb.
+	// is FL FR C LFE SL SR, as standalone hands it to cubeb. Converted
+	// straight into the ring, in as many pieces as it lies in there.
 	const size_t frames = m_samplesPerBlock;
 	const unsigned in = m_channels, out = s_out_channels;
-	const int16_t* block = data;
-	if (in != out)
-	{
-		m_convert.resize(frames * out);
-		for (size_t f = 0; f < frames; f++)
-		{
-			const int16_t* s = data + f * in;
-			int16_t* d = m_convert.data() + f * out;
-			if (in == 1)
-			{
-				for (unsigned c = 0; c < out; c++)
-					d[c] = c < 2 ? s[0] : 0;
-			}
-			else if (in == 6 && out == 2)
-			{
-				// Centre and surrounds at -3 dB, LFE left out
-				const float c = s[2] * 0.7071f;
-				const float l = s[0] + c + s[4] * 0.7071f;
-				const float r = s[1] + c + s[5] * 0.7071f;
-				d[0] = (int16_t)std::clamp(l, -32768.0f, 32767.0f);
-				d[1] = (int16_t)std::clamp(r, -32768.0f, 32767.0f);
-			}
-			else
-			{
-				for (unsigned ch = 0; ch < out; ch++)
-					d[ch] = ch < in ? s[ch] : 0;
-			}
-		}
-		block = m_convert.data();
-	}
 	const size_t sampleCount = frames * out;
-	const size_t written = s_ring_buffer.Write(block, sampleCount);
+	size_t written = 0;
+	if (in == out)
+		written = s_ring_buffer.Write(data, sampleCount);
+	else
+	{
+		size_t f = 0;
+		while (f < frames)
+		{
+			int16_t* dst;
+			size_t n = s_ring_buffer.Reserve(&dst, (frames - f) * out);
+			n -= n % out;
+			if (n == 0)
+				break;
+			const size_t pieceFrames = n / out;
+			for (size_t i = 0; i < pieceFrames; i++, f++)
+			{
+				const int16_t* s = data + f * in;
+				int16_t* d = dst + i * out;
+				if (in == 1)
+				{
+					for (unsigned c = 0; c < out; c++)
+						d[c] = c < 2 ? s[0] : 0;
+				}
+				else if (in == 6 && out == 2)
+				{
+					// Centre and surrounds at -3 dB, LFE left out
+					const float c = s[2] * 0.7071f;
+					const float l = s[0] + c + s[4] * 0.7071f;
+					const float r = s[1] + c + s[5] * 0.7071f;
+					d[0] = (int16_t)std::clamp(l, -32768.0f, 32767.0f);
+					d[1] = (int16_t)std::clamp(r, -32768.0f, 32767.0f);
+				}
+				else
+				{
+					for (unsigned ch = 0; ch < out; ch++)
+						d[ch] = ch < in ? s[ch] : 0;
+				}
+			}
+			s_ring_buffer.Commit(n);
+			written += n;
+		}
+	}
 	AccountWrite(sampleCount, written);
 	return written > 0;
 }
@@ -155,33 +163,51 @@ void LibretroAudioAPI::FlushAudio(size_t frames)
 	if (availableSamples > 3 * frameSamples)
 		wanted = availableSamples - 2 * frameSamples;
 	wanted -= wanted % channels;
-	const size_t bufferCap = s_flush_buffer.size();
-	const size_t samplesToRead = std::min({availableSamples, wanted, bufferCap});
-	const size_t samplesRead = s_ring_buffer.Read(s_flush_buffer.data(), samplesToRead);
-
+	const size_t samplesToRead = std::min(availableSamples, wanted);
+	size_t samplesSent = 0;
+	const size_t samplesRead = SendFromRing(samplesToRead, samplesSent);
 	if (samplesRead == 0)
 		return;
+	AccountFlush(samplesRead, samplesSent);
+}
 
-	const size_t framesRead = samplesRead / channels;
-
-	// retro_audio_sample_batch_t may consume fewer frames than offered; loop so
-	// a partial accept doesn't lose audio.
-	size_t framesSent = 0;
-	const int16_t* cursor = s_flush_buffer.data();
-	while (framesSent < framesRead)
+// Hands the frontend up to sampleCount buffered samples straight out of the
+// ring - no copy on the way - and consumes all of them, as many as it took or
+// not: what it refuses is dropped, as it always was. Returns how many were
+// taken out of the ring; sent is how many the frontend accepted.
+size_t LibretroAudioAPI::SendFromRing(size_t sampleCount, size_t& sent)
+{
+	// 5.1: FL FR C LFE SL SR, as RetroArch's speaker bits run
+	constexpr unsigned k51 = 0x001 | 0x002 | 0x004 | 0x008 | 0x200 | 0x400;
+	const size_t channels = s_out_channels;
+	size_t taken = 0;
+	bool refused = false;
+	sent = 0;
+	while (taken < sampleCount)
 	{
-		// 5.1: FL FR C LFE SL SR, as RetroArch's speaker bits run
-		constexpr unsigned k51 = 0x001 | 0x002 | 0x004 | 0x008 | 0x200 | 0x400;
-		const size_t accepted = channels == 6
-			? s_multi_callback(cursor, framesRead - framesSent, 6, k51)
-			: s_audio_callback(cursor, framesRead - framesSent);
-		if (accepted == 0)
+		const int16_t* span;
+		const size_t n = s_ring_buffer.Peek(&span, sampleCount - taken);
+		if (n == 0)
 			break;
-		framesSent += accepted;
-		cursor += accepted * channels;
+		const size_t frames = n / channels;
+		size_t framesSent = 0;
+		// retro_audio_sample_batch_t may consume fewer frames than offered;
+		// loop so a partial accept doesn't lose audio
+		while (!refused && framesSent < frames)
+		{
+			const int16_t* cursor = span + framesSent * channels;
+			const size_t accepted = channels == 6
+				? s_multi_callback(cursor, frames - framesSent, 6, k51)
+				: s_audio_callback(cursor, frames - framesSent);
+			if (accepted == 0)
+				refused = true;
+			framesSent += accepted;
+		}
+		sent += framesSent * channels;
+		s_ring_buffer.Consume(n);
+		taken += n;
 	}
-
-	AccountFlush(samplesRead, framesSent * channels);
+	return taken;
 }
 
 size_t LibretroAudioAPI::PullAudio(size_t maxFrames)
@@ -202,27 +228,12 @@ size_t LibretroAudioAPI::PullAudio(size_t maxFrames)
 		s_ring_buffer.Discard(excess - excess % channels);
 	}
 
-	// Its own buffer: s_flush_buffer belongs to retro_run's FlushAudio
-	static std::array<int16_t, 1024 * LibretroAudioRingBuffer::kChannels> s_pull_buffer;
 	const size_t wanted = std::min<size_t>(maxFrames, 1024) * channels;
-	const size_t samplesRead = s_ring_buffer.Read(s_pull_buffer.data(), wanted);
-	const size_t framesRead = samplesRead / channels;
-
-	size_t framesSent = 0;
-	const int16_t* cursor = s_pull_buffer.data();
-	while (framesSent < framesRead)
-	{
-		constexpr unsigned k51 = 0x001 | 0x002 | 0x004 | 0x008 | 0x200 | 0x400;
-		const size_t accepted = channels == 6
-			? s_multi_callback(cursor, framesRead - framesSent, 6, k51)
-			: s_audio_callback(cursor, framesRead - framesSent);
-		if (accepted == 0)
-			break;
-		framesSent += accepted;
-		cursor += accepted * channels;
-	}
+	size_t samplesSent = 0;
+	const size_t samplesRead = SendFromRing(wanted, samplesSent);
 	if (samplesRead)
-		AccountFlush(samplesRead, framesSent * channels);
+		AccountFlush(samplesRead, samplesSent);
+	const size_t framesSent = samplesSent / channels;
 	return framesSent;
 }
 

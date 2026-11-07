@@ -3,6 +3,7 @@
 #include "PPCFunctionBoundaryTracker.h"
 #include "PPCRecompiler.h"
 #include "PPCRecompilerIml.h"
+#include "PPCRecompilerWorkQueue.h"
 #include "util/containers/RangeStore.h"
 #include "Cafe/OS/libs/coreinit/coreinit_CodeGen.h"
 #include "config/ActiveSettings.h"
@@ -44,7 +45,7 @@ struct
 {
 	std::atomic_bool initialized{false};
 	FSpinlock recompilerSpinlock;
-	std::queue<MPTR> targetQueue;
+	PPCRecompilerWorkQueue targetQueue; // pushed under recompilerSpinlock, popped without it
 	std::vector<ppcInvalidationRange> invalidationRanges;
 	std::atomic_int_fast32_t recompilerEnableCount{0};
 	// recompiler thread
@@ -113,8 +114,13 @@ void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
 		s_ppcRecompilerState.recompilerSpinlock.unlock();
 		return;
 	}
-	// add to recompilation queue and flag as visited
-	s_ppcRecompilerState.targetQueue.emplace(enterAddress);
+	// add to recompilation queue and flag as visited - unless the queue is
+	// full, in which case it stays unvisited and is offered again later
+	if (!s_ppcRecompilerState.targetQueue.Push(enterAddress))
+	{
+		s_ppcRecompilerState.recompilerSpinlock.unlock();
+		return;
+	}
 	ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] = PPCRecompiler_leaveRecompilerCode_visited;
 
 	s_ppcRecompilerState.recompilerSpinlock.unlock();
@@ -476,33 +482,24 @@ void PPCRecompiler_thread()
 
 	while (true)
 	{
-        if(s_ppcRecompilerState.workerThreadStopSignal)
-            return;
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		// Asleep until an address is pushed or the thread is stopped: a push
+		// is answered at once instead of at the next 10 ms poll.
+		s_ppcRecompilerState.targetQueue.WaitForWork(s_ppcRecompilerState.workerThreadStopSignal);
+		if (s_ppcRecompilerState.workerThreadStopSignal)
+			return;
 		// asynchronous recompilation:
 		// 1) take address from queue
 		// 2) check if address is still marked as visited
 		// 3) if yes -> calculate size, gather all entry points, recompile and update jump table
-		while (true)
+		uint32 enterAddress;
+		while (s_ppcRecompilerState.targetQueue.Pop(enterAddress))
 		{
-			s_ppcRecompilerState.recompilerSpinlock.lock();
-			if (s_ppcRecompilerState.targetQueue.empty())
-			{
-				s_ppcRecompilerState.recompilerSpinlock.unlock();
-				break;
-			}
-			auto enterAddress = s_ppcRecompilerState.targetQueue.front();
-			s_ppcRecompilerState.targetQueue.pop();
-
-			auto funcPtr = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4];
-			if (funcPtr != PPCRecompiler_leaveRecompilerCode_visited)
-			{
-				// only recompile functions if marked as visited
-				s_ppcRecompilerState.recompilerSpinlock.unlock();
-				continue;
-			}
-			s_ppcRecompilerState.recompilerSpinlock.unlock();
-
+			// Without the lock, as the pushers check it before taking it: a
+			// stale answer either skips an address the interpreter will offer
+			// again, or translates one that makeRecompiledFunctionActive then
+			// refuses under the lock.
+			if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_visited)
+				continue; // only recompile functions if marked as visited
 			PPCRecompiler_recompileAtAddress(enterAddress);
 			if(s_ppcRecompilerState.workerThreadStopSignal)
 				return;
@@ -751,6 +748,8 @@ void PPCRecompiler_init()
 
 	// launch recompilation thread
     s_ppcRecompilerState.workerThreadStopSignal = false;
+    if (!s_ppcRecompilerState.targetQueue.Init())
+        cemuLog_log(LogType::Force, "Recompiler: no work queue, everything stays interpreted");
     s_ppcRecompilerState.workerThread = std::thread(PPCRecompiler_thread);
 }
 
@@ -763,11 +762,12 @@ void PPCRecompiler_Shutdown()
         return;
     // shut down recompiler thread
     s_ppcRecompilerState.workerThreadStopSignal = true;
+    s_ppcRecompilerState.targetQueue.Wake();
     if(s_ppcRecompilerState.workerThread.joinable())
         s_ppcRecompilerState.workerThread.join();
     // clean up queues
-    while(!s_ppcRecompilerState.targetQueue.empty())
-        s_ppcRecompilerState.targetQueue.pop();
+    s_ppcRecompilerState.targetQueue.Clear();
+    s_ppcRecompilerState.targetQueue.Free();
     s_ppcRecompilerState.invalidationRanges.clear();
     // clean range store
     s_ppcRecompilerState.functionStorage.clear();

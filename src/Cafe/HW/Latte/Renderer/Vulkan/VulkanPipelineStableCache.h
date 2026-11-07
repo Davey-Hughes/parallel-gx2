@@ -55,6 +55,8 @@ public:
 
 private:
 	int CompilerThread(); // runs on: this cache's own plCacheCompiler threads
+	template<typename TPred>
+	void WaitForCompileProgress(TPred progressed);
 	void WorkerThread();  // runs on: this cache's own plCacheWriter thread
 
 	std::thread* m_pipelineCacheStoreThread;

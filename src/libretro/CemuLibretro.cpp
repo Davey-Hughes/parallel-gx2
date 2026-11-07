@@ -94,6 +94,7 @@
 #include "input/motion/MotionHandler.h"
 #include <condition_variable>
 #include <atomic>
+#include <rthreads/retro_eventcount.h>
 
 // GL entry points come from the frontend, which owns the context. No wgl, glX,
 // egl or CGL anywhere in the core: making a context current, sharing one,
@@ -393,9 +394,14 @@ static bool s_render_ahead = false;
 // the core back in charge of its own speed, which is the thing being fixed. What
 // keeps that from hanging a shutdown is libretro_frame_gate_release, called
 // before anything waits for the GPU thread to stop.
-static std::mutex s_gate_mutex;
-static std::condition_variable s_gate_cv;
-static unsigned s_gate_tokens = 1;    // one, so the first frame does not wait
+//
+// No lock either. The state is atomics; a waiter parks on s_gate_wake, an
+// eventcount, and whoever changes the state notifies it after the change - so
+// a waiter that saw the old state is either woken or sees the new one when it
+// checks again before sleeping.
+static retro_eventcount_t s_gate_wake;
+extern retro_eventcount_t s_frame_wake;
+static std::atomic<unsigned> s_gate_tokens{1};    // one, so the first frame does not wait
 static std::atomic_bool s_gate_released{false};  // shutting down: nothing waits any more
 
 // True between "the frontend asked for a frame" and "the frame was handed
@@ -419,6 +425,36 @@ static std::atomic_bool s_frame_permit{false};
 // Nanoseconds on steady_clock, so the window can be read without the mutex.
 static std::atomic<int64_t> s_last_grant_ns{0};
 static constexpr auto kFrontendStoppedAfter = std::chrono::milliseconds(100);
+
+// The eventcounts the gate and the frame handoff park on, brought up once for
+// the life of the process: the threads that wait on them come and go with each
+// title, and freeing one under such a thread is the only way they could fail.
+static bool libretro_wake_init()
+{
+	static const bool s_ok = [] {
+		return retro_eventcount_init(&s_gate_wake) && retro_eventcount_init(&s_frame_wake);
+	}();
+	return s_ok;
+}
+
+// Parks the calling thread until pred() holds. Every change that can make it
+// hold is followed by a notify of the same eventcount.
+template<typename TPred>
+static void libretro_wait_until(retro_eventcount_t* ec, TPred pred)
+{
+	for (;;)
+	{
+		if (pred())
+			return;
+		const int key = retro_eventcount_prepare_wait(ec);
+		if (pred())
+		{
+			retro_eventcount_cancel_wait(ec);
+			return;
+		}
+		retro_eventcount_commit_wait(ec, key);
+	}
+}
 
 // Nonzero while something outside the frame loop needs the emulator to keep
 // moving: the frame gate parks threads, and a handshake that waits for one of
@@ -458,15 +494,21 @@ void libretro_frame_gate_wait()
 				std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
 		}
 	} addWait{waitStart};
-	std::unique_lock lock(s_gate_mutex);
 	// The frame is delivered, so the window closes here rather than when the
 	// next one opens. The emulated cores keep going until the frontend has
 	// stopped asking altogether (s_last_grant_ns); this thread waits for the next
 	// token.
 	s_frame_permit = false;
-	s_gate_cv.wait(lock, [] { return s_gate_tokens > 0 || s_gate_released || s_gate_hold_open; });
-	if (s_gate_tokens > 0)
-		s_gate_tokens--;
+	libretro_wait_until(&s_gate_wake, [] {
+		return s_gate_tokens.load(std::memory_order_acquire) > 0 ||
+			s_gate_released.load(std::memory_order_acquire) ||
+			s_gate_hold_open.load(std::memory_order_acquire) != 0;
+	});
+	// Take the token if there is one. Only this thread takes; a grant racing
+	// with this sets it back to one, which is the cap anyway.
+	unsigned tokens = s_gate_tokens.load(std::memory_order_acquire);
+	while (tokens > 0 && !s_gate_tokens.compare_exchange_weak(tokens, tokens - 1, std::memory_order_acq_rel))
+		;
 }
 
 // Runs on: the emulated CPU threads and the GPU thread - everything that is
@@ -482,13 +524,12 @@ void libretro_frame_window_wait()
 	// window to keep it out of.
 	if (!s_game_loaded || Latte_IsOnGpuCothread())
 		return;
-	// The state is written under s_gate_mutex but read here without it. This
-	// runs on every pass of the scheduler's idle loop - millions a second on
-	// the main core now that the cores are not parked between frames - and the
-	// GPU command processor takes it at every command. With the mutex on each
-	// of those, the idle loop held it nearly all the time and the GPU thread
-	// queued behind it at every command: 60 fps fell to 15. The lock is for
-	// waiting only.
+	// This runs on every pass of the scheduler's idle loop - millions a
+	// second on the main core now that the cores are not parked between
+	// frames - and the GPU command processor takes it at every command. When
+	// it took a mutex on each of those, the idle loop held it nearly all the
+	// time and the GPU thread queued behind it at every command: 60 fps fell to
+	// 15. Open, it costs a few atomic loads and a clock read.
 	auto open = [] {
 		const int64_t now = std::chrono::steady_clock::now().time_since_epoch().count();
 		return s_frame_permit.load(std::memory_order_acquire) ||
@@ -499,10 +540,9 @@ void libretro_frame_window_wait()
 	};
 	if (open())
 		return;
-	std::unique_lock lock(s_gate_mutex);
 	// Time only ever turns this from true to false; the way back is a grant,
-	// which notifies under the mutex, so a predicate wait cannot miss it.
-	s_gate_cv.wait(lock, open);
+	// a hold or a release, each of which notifies after it changes the state.
+	libretro_wait_until(&s_gate_wake, open);
 }
 
 // Lets the emulator run outside a frame for as long as the hold is held. For
@@ -512,42 +552,42 @@ void libretro_frame_window_wait()
 // Runs on: the frontend's thread, from the libretro callbacks.
 void libretro_frame_gate_hold_open(bool hold)
 {
-	std::lock_guard lock(s_gate_mutex);
 	if (hold)
-		s_gate_hold_open++;
-	else if (s_gate_hold_open > 0)
-		s_gate_hold_open--;
-	s_gate_cv.notify_all();
+		s_gate_hold_open.fetch_add(1, std::memory_order_acq_rel);
+	else
+	{
+		unsigned held = s_gate_hold_open.load(std::memory_order_acquire);
+		while (held > 0 && !s_gate_hold_open.compare_exchange_weak(held, held - 1, std::memory_order_acq_rel))
+			;
+	}
+	retro_eventcount_notify(&s_gate_wake);
 }
 
 // retro_run. Capped at one: a frontend that ran ahead must not build up credit
 // it can spend later, or the emulator would sprint after every menu visit.
 static void libretro_frame_gate_grant()
 {
-	std::lock_guard lock(s_gate_mutex);
-	s_gate_tokens = 1;
-	s_frame_permit = true;
+	s_gate_tokens.store(1, std::memory_order_release);
+	s_frame_permit.store(true, std::memory_order_release);
 	s_last_grant_ns.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_release);
-	s_gate_cv.notify_all();
+	retro_eventcount_notify(&s_gate_wake);
 }
 
 // Shutdown, and any other point where waiting for a token would be waiting for
 // a frontend that is not coming back.
 void libretro_frame_gate_release()
 {
-	std::lock_guard lock(s_gate_mutex);
-	s_gate_released = true;
-	s_frame_permit = true;
-	s_gate_cv.notify_all();
+	s_gate_released.store(true, std::memory_order_release);
+	s_frame_permit.store(true, std::memory_order_release);
+	retro_eventcount_notify(&s_gate_wake);
 }
 
-// Frame synchronization
-static std::mutex s_frame_mutex;
-static std::condition_variable s_frame_cv;
+// Frame synchronization: a flag and an eventcount retro_run parks on
+retro_eventcount_t s_frame_wake;
 std::atomic_bool s_frame_ready{false};
 
-// The GPU thread telling retro_run that the frame is done. Under the mutex and
-// with a notify, both of which matter: retro_run waits on s_frame_cv with a
+// The GPU thread telling retro_run that the frame is done. The flag and then
+// the notify, both of which matter: retro_run waits on s_frame_wake with a
 // 33 ms timeout, so a flag set without waking it is a frame that arrives when
 // the timeout expires rather than when it is ready - 30 fps out of a 60 fps
 // title. The Vulkan renderer used to store the flag on its own and did exactly
@@ -593,11 +633,8 @@ void libretro_signal_frame_ready()
 {
 	s_prof_frames_ready.fetch_add(1, std::memory_order_relaxed);
 	s_game_frames.fetch_add(1, std::memory_order_relaxed);
-	{
-		std::lock_guard lock(s_frame_mutex);
-		s_frame_ready.store(true, std::memory_order_release);
-	}
-	s_frame_cv.notify_one();
+	s_frame_ready.store(true, std::memory_order_release);
+	retro_eventcount_notify(&s_frame_wake);
 }
 static std::atomic_bool s_shutting_down{false};
 // Set by the first retro_run that runs the startup handshake. A launch that
@@ -3808,6 +3845,13 @@ RETRO_API void retro_init()
 {
 	if (s_initialized)
 		return;
+	// The frame gate's and the frame handoff's eventcounts, before any thread
+	// that could wait on them. Without them nothing can wait, so nothing runs.
+	if (!libretro_wake_init())
+	{
+		libretro_log(RETRO_LOG_ERROR, "could not set up the frame gate's eventcounts\n");
+		return;
+	}
 
 	// Breadcrumbs through the frontend's log rather than Cemu's. Cemu's log.txt
 	// does not exist until the paths below are set up, so a core that dies in
@@ -4024,11 +4068,8 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device)
 static void libretro_wake_frame_waiters()
 {
 	s_shutting_down = true;
-	{
-		std::lock_guard lock(s_frame_mutex);
-		s_frame_ready = true;
-		s_frame_cv.notify_all();
-	}
+	s_frame_ready.store(true, std::memory_order_release);
+	retro_eventcount_notify(&s_frame_wake);
 	// Before ShutdownTitle, which stops the GPU thread: a thread parked at the
 	// frame gate is a thread that never gets there.
 	libretro_frame_gate_release();
@@ -5135,12 +5176,11 @@ static void libretro_start_install(std::vector<TitleInfo> found, bool removeSour
 // emulator standing still.
 static void libretro_frame_gate_rearm()
 {
-	std::lock_guard lock(s_gate_mutex);
-	s_gate_released = false;
-	s_gate_tokens = 1;
-	s_frame_permit = true;
-	s_gate_hold_open = 0;
-	s_gate_cv.notify_all();
+	s_gate_released.store(false, std::memory_order_release);
+	s_gate_tokens.store(1, std::memory_order_release);
+	s_frame_permit.store(true, std::memory_order_release);
+	s_gate_hold_open.store(0, std::memory_order_release);
+	retro_eventcount_notify(&s_gate_wake);
 }
 
 static void libretro_prepare_and_launch_title()
@@ -6124,13 +6164,10 @@ RETRO_API void retro_unload_game()
 	s_reset_requested.store(false, std::memory_order_release);
 	s_shutting_down = false;
 	s_frame_ready = false;
-	{
-		std::lock_guard lock(s_gate_mutex);
-		s_gate_released = false;
-		s_gate_tokens = 1;
-		s_frame_permit = true;
-		s_gate_hold_open = 0;
-	}
+	s_gate_released.store(false, std::memory_order_release);
+	s_gate_tokens.store(1, std::memory_order_release);
+	s_frame_permit.store(true, std::memory_order_release);
+	s_gate_hold_open.store(0, std::memory_order_release);
 	s_ppc_process_exited = false;
 	// An install loaded as content has nothing else to wait for it
 	if (s_install_content && s_convert_thread.joinable())
@@ -7450,10 +7487,27 @@ RETRO_API void retro_run()
 		else
 #endif
 		{
-			std::unique_lock lock(s_frame_mutex);
-			profTimedOut = !s_frame_cv.wait_for(lock, frameTime, [] {
-				return s_frame_ready.load();
-			});
+			// Until the frame is ready or its time is up, parked on the
+			// eventcount the GPU thread notifies after setting the flag
+			const auto deadline = std::chrono::steady_clock::now() + frameTime;
+			profTimedOut = false;
+			while (!s_frame_ready.load(std::memory_order_acquire))
+			{
+				const int64_t left = std::chrono::duration_cast<std::chrono::microseconds>(
+					deadline - std::chrono::steady_clock::now()).count();
+				if (left <= 0)
+				{
+					profTimedOut = true;
+					break;
+				}
+				const int key = retro_eventcount_prepare_wait(&s_frame_wake);
+				if (s_frame_ready.load(std::memory_order_acquire))
+				{
+					retro_eventcount_cancel_wait(&s_frame_wake);
+					break;
+				}
+				retro_eventcount_commit_wait_timeout(&s_frame_wake, key, left);
+			}
 			s_frame_ready = false;
 		}
 	}

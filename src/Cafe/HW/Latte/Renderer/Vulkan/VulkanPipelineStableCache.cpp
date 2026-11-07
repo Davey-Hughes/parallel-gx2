@@ -12,6 +12,8 @@
 #include "Cafe/HW/Latte/Core/LatteShaderCache.h"
 #include "util/helpers/helpers.h"
 #include "util/crypto/sha.h"
+#include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 
 struct
 {
@@ -99,8 +101,13 @@ bool VulkanPipelineStableCache::UpdateLoading(uint32& pipelinesLoadedTotal, uint
 	{
 		if (m_compilationQueue.size() >= 50)
 		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-			return true; // queue up to 50 entries at a time
+			// Queue up to 50 entries at a time, and refill as soon as one is
+			// taken: upstream napped 10 ms here, which held the compile
+			// threads to 50 pipelines per 10 ms whenever the driver's own
+			// cache made them faster than that - the common case on a
+			// second boot.
+			WaitForCompileProgress([this] { return m_compilationQueue.size() < 50; });
+			return true;
 		}
 
 		uint64 fileNameA, fileNameB;
@@ -117,7 +124,7 @@ bool VulkanPipelineStableCache::UpdateLoading(uint32& pipelinesLoadedTotal, uint
 	}
 	if (g_vkCacheState.pipelinesLoaded != g_vkCacheState.pipelinesQueued)
 	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		WaitForCompileProgress([] { return g_vkCacheState.pipelinesLoaded == g_vkCacheState.pipelinesQueued; });
 		return true; // pipelines still compiling
 	}
 	return false; // done
@@ -492,6 +499,17 @@ bool VulkanPipelineStableCache::DeserializePipeline(MemStreamReader& memReader, 
 	return true;
 }
 
+// Runs on: the GPU thread, in UpdateLoading. Until the compile threads have
+// moved on, or the GPU thread is asked to do something else - the loading
+// screen's own loop asks for those right after this returns.
+template<typename TPred>
+void VulkanPipelineStableCache::WaitForCompileProgress(TPred progressed)
+{
+	LatteGpuWake_WaitUntil([&] {
+		return progressed() || Latte_GetStopSignal() || Latte_IsGpuPauseRequested();
+	});
+}
+
 int VulkanPipelineStableCache::CompilerThread()
 {
 	SetThreadName("plCacheCompiler");
@@ -502,6 +520,8 @@ int VulkanPipelineStableCache::CompilerThread()
 			continue;
 		LoadPipelineFromCache(pipelineData);
 		++g_vkCacheState.pipelinesLoaded;
+		LatteGpuWake_Notify(); // the loader is waiting for this, or for room in the queue
+
 	}
 	return 0;
 }

@@ -1,101 +1,9 @@
 #pragma once
 
 #include "audio/IAudioAPI.h"
+#include "libretro/LibretroAudioRing.h"
 
-#include <array>
 #include <atomic>
-#include <cstring>
-#include <vector>
-
-// Lock-free ring buffer for audio samples.
-// Single producer (Cemu AX audio thread), single consumer (retro_run thread).
-class LibretroAudioRingBuffer
-{
-public:
-	// ~341 ms at 48 kHz 5.1 (a second in stereo). It has to hold everything AX may make between
-	// two retro_runs, and a retro_run grants up to 250 ms (see
-	// AXOut_LibretroGrantSamples). At 128 ms a slow device's frames - 8 or 9
-	// a second in sco8487's heavier Deus Ex scenes - got grants the ring could
-	// not take, and the rest was dropped. Drained every retro_run, so the
-	// size adds no latency.
-	static constexpr size_t kBufferFrames = 16384;
-	// Up to 5.1; the ring holds whole frames of the output's channels, 2 or
-	// 6, both of which divide its size
-	static constexpr size_t kChannels = 6;
-	static constexpr size_t kBufferSamples = kBufferFrames * kChannels;
-
-	LibretroAudioRingBuffer() = default;
-
-	size_t GetReadAvailableSamples() const
-	{
-		const size_t w = m_write_pos.load(std::memory_order_acquire);
-		const size_t r = m_read_pos.load(std::memory_order_relaxed);
-		return (w >= r) ? (w - r) : (kBufferSamples - r + w);
-	}
-
-	size_t Write(const int16_t* data, size_t sampleCount)
-	{
-		size_t w = m_write_pos.load(std::memory_order_relaxed);
-		const size_t r = m_read_pos.load(std::memory_order_acquire);
-
-		const size_t used = (w >= r) ? (w - r) : (kBufferSamples - r + w);
-		const size_t available = kBufferSamples - used - kChannels;
-		const size_t toWrite = (sampleCount <= available) ? sampleCount : available;
-
-		if (toWrite == 0)
-			return 0;
-
-		const size_t firstChunk = (w + toWrite <= kBufferSamples) ? toWrite : (kBufferSamples - w);
-		std::memcpy(m_buffer.data() + w, data, firstChunk * sizeof(int16_t));
-		if (firstChunk < toWrite)
-			std::memcpy(m_buffer.data(), data + firstChunk, (toWrite - firstChunk) * sizeof(int16_t));
-
-		m_write_pos.store((w + toWrite) % kBufferSamples, std::memory_order_release);
-		return toWrite;
-	}
-
-	size_t Read(int16_t* dest, size_t maxSamples)
-	{
-		const size_t w = m_write_pos.load(std::memory_order_acquire);
-		size_t r = m_read_pos.load(std::memory_order_relaxed);
-
-		const size_t available = (w >= r) ? (w - r) : (kBufferSamples - r + w);
-		const size_t toRead = (maxSamples <= available) ? maxSamples : available;
-
-		if (toRead == 0)
-			return 0;
-
-		const size_t firstChunk = (r + toRead <= kBufferSamples) ? toRead : (kBufferSamples - r);
-		std::memcpy(dest, m_buffer.data() + r, firstChunk * sizeof(int16_t));
-		if (firstChunk < toRead)
-			std::memcpy(dest + firstChunk, m_buffer.data(), (toRead - firstChunk) * sizeof(int16_t));
-
-		m_read_pos.store((r + toRead) % kBufferSamples, std::memory_order_release);
-		return toRead;
-	}
-
-	void Reset()
-	{
-		m_write_pos.store(0, std::memory_order_relaxed);
-		m_read_pos.store(0, std::memory_order_relaxed);
-	}
-
-	// Drops the oldest samples, from the reading side, so it is safe while
-	// the writer goes on (Reset() is not)
-	void Discard(size_t sampleCount)
-	{
-		const size_t w = m_write_pos.load(std::memory_order_acquire);
-		const size_t r = m_read_pos.load(std::memory_order_relaxed);
-		const size_t available = (w >= r) ? (w - r) : (kBufferSamples - r + w);
-		const size_t toSkip = (sampleCount <= available) ? sampleCount : available;
-		m_read_pos.store((r + toSkip) % kBufferSamples, std::memory_order_release);
-	}
-
-private:
-	std::array<int16_t, kBufferSamples> m_buffer{};
-	std::atomic<size_t> m_write_pos{0};
-	std::atomic<size_t> m_read_pos{0};
-};
 
 class LibretroAudioAPI : public IAudioAPI
 {
@@ -108,7 +16,7 @@ public:
 		unsigned channels, unsigned layout);
 
 	LibretroAudioAPI(uint32 samplerate, uint32 channels, uint32 samples_per_block, uint32 bits_per_sample);
-	// The ring and the flush buffer are statics that outlive any one instance,
+	// The ring is a static that outlive any one instance,
 	// and until this they were only ever put back by the next run's
 	// constructor - so a closed title left its last few milliseconds of audio
 	// sitting there for the next one to start with. Emptied here instead,
@@ -157,6 +65,7 @@ public:
 	static bool IsStatsLogging() { return s_log_stats; }
 
 private:
+	static size_t SendFromRing(size_t sampleCount, size_t& sent);
 	static void AccountWrite(size_t offered, size_t written);
 	static void AccountFlush(size_t read, size_t sent);
 	static void ReportStats();
@@ -164,11 +73,8 @@ private:
 	static AudioCallback s_audio_callback;
 	static MultiAudioCallback s_multi_callback;
 	static unsigned s_out_channels;
-	// One block converted to the output's channels
-	std::vector<int16_t> m_convert;
 	static LibretroAudioRingBuffer s_ring_buffer;
 	static std::atomic_bool s_thread_mode;
-	static std::vector<int16_t> s_flush_buffer;
 
 	static bool s_log_stats;
 	static uint64_t s_stat_offered;

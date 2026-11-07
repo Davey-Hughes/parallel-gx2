@@ -2778,7 +2778,38 @@ void VulkanRenderer::StopPipelineCacheSaveThread()
 		return;
 	m_destructionRequested = true;
 	m_pipeline_cache_semaphore.notify();
+	if (m_pipeline_cache_wake_ok)
+		retro_eventcount_notify(&m_pipeline_cache_wake);
 	m_pipeline_cache_save_thread.join();
+	retro_eventcount_free(&m_pipeline_cache_wake); // safe after a failed init too
+	m_pipeline_cache_wake_ok = false;
+}
+
+// Runs on: the save thread. Sleeps for the duration unless the renderer is
+// being destroyed, which ends the sleep at once; true if it is.
+bool VulkanRenderer::PipelineCacheSaveWait(std::chrono::milliseconds duration)
+{
+	const auto deadline = std::chrono::steady_clock::now() + duration;
+	for (;;)
+	{
+		if (m_destructionRequested)
+			return true;
+		const auto left = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
+		if (left <= 0)
+			return false;
+		if (!m_pipeline_cache_wake_ok)
+		{
+			std::this_thread::sleep_for(std::chrono::microseconds(std::min<int64_t>(left, 250000)));
+			continue;
+		}
+		const int key = retro_eventcount_prepare_wait(&m_pipeline_cache_wake);
+		if (m_destructionRequested)
+		{
+			retro_eventcount_cancel_wait(&m_pipeline_cache_wake);
+			return true;
+		}
+		retro_eventcount_commit_wait_timeout(&m_pipeline_cache_wake, key, left);
+	}
 }
 
 void VulkanRenderer::PipelineCacheSaveThread(size_t cache_size)
@@ -2807,17 +2838,19 @@ void VulkanRenderer::PipelineCacheSaveThread(size_t cache_size)
 		m_pipeline_cache_semaphore.wait();
 		if (m_destructionRequested)
 			return;
-		for (sint32 i = 0; i < 15 * 4; i++)
-		{
-			if (m_destructionRequested)
-				return;
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
-		}
+		// Saved 15 s after the last new pipeline asked for it, as upstream
+		// does; a renderer going away ends the wait instead of being noticed
+		// up to 250 ms later
+		if (PipelineCacheSaveWait(std::chrono::seconds(15)))
+			return;
 
 		// always prioritize the compiler threads over this thread
 		// avoid calling stalling lock() since it will block other threads from entering even when the lock is currently held in shared mode
 		while (!m_pipeline_cache_save_mutex.try_lock())
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+		{
+			if (PipelineCacheSaveWait(std::chrono::milliseconds(250)))
+				return;
+		}
 
 		size_t size = 0;
 		VkResult res = vkGetPipelineCacheData(m_logicalDevice, m_pipeline_cache, &size, nullptr);
@@ -2896,6 +2929,7 @@ void VulkanRenderer::CreatePipelineCache()
 	size_t cache_size = 0;
 	vkGetPipelineCacheData(m_logicalDevice, m_pipeline_cache, &cache_size, nullptr);
 
+	m_pipeline_cache_wake_ok = retro_eventcount_init(&m_pipeline_cache_wake);
 	m_pipeline_cache_save_thread = std::thread(&VulkanRenderer::PipelineCacheSaveThread, this, cache_size);
 }
 
