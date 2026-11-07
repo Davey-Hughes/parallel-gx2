@@ -1,11 +1,12 @@
 # The lock-free handoffs the core's threads use (run_tests.sh): the
-# recompiler's work queue, the GPU thread's wake, the audio ring.
+# recompiler's work queue, the GPU thread's wake, the audio ring, the log
+# file, the frontend's Vulkan queue lock, and the input and rumble handoffs.
 # SANITIZER=thread or SANITIZER=address,undefined for the sanitizer runs.
 LRC := ../../dependencies/libretro-common
 SRC := ../../src
 CXX ?= g++
 CC ?= gcc
-FLAGS := -O1 -g -I$(SRC) -I$(LRC)/include -DHAVE_THREADS
+FLAGS := -O1 -g -I$(SRC) -I$(SRC)/libretro -I$(LRC)/include -I../../dependencies/Vulkan-Headers/include -DHAVE_THREADS
 ifneq ($(SANITIZER),)
    FLAGS += -fsanitize=$(SANITIZER) -fno-omit-frame-pointer
 endif
@@ -17,9 +18,11 @@ endif
 C_SRCS := $(LRC)/queues/retro_spsc.c $(LRC)/rthreads/retro_eventcount.c $(LRC)/rthreads/rthreads.c
 CXX_SRCS := handoff_test.cpp \
 	$(SRC)/Cafe/HW/Espresso/Recompiler/PPCRecompilerWorkQueue.cpp \
-	$(SRC)/Cafe/HW/Latte/Core/LatteGpuWake.cpp
+	$(SRC)/Cafe/HW/Latte/Core/LatteGpuWake.cpp \
+	$(SRC)/libretro/LibretroVkQueue.cpp
 HDRS := $(SRC)/libretro/LibretroAudioRing.h $(SRC)/Cafe/HW/Latte/Core/LatteGpuWake.h \
-	$(SRC)/util/helpers/ThreadStartedFlag.h $(SRC)/util/helpers/EventWake.h $(SRC)/Cemu/Logging/LogFileSink.h
+	$(SRC)/util/helpers/ThreadStartedFlag.h $(SRC)/util/helpers/EventWake.h $(SRC)/Cemu/Logging/LogFileSink.h \
+	$(SRC)/util/helpers/SeqlockValue.h $(SRC)/util/helpers/MpscList.h $(SRC)/libretro/LibretroVkQueue.h
 
 handoff_test$(EXE): $(CXX_SRCS) $(C_SRCS) $(HDRS)
 	$(CC) $(FLAGS) -std=gnu99 -c $(LRC)/queues/retro_spsc.c -o retro_spsc.o

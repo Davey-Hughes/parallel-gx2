@@ -19,6 +19,14 @@
 //  - log.txt's lock-free sink: lines written from many threads at once come
 //    out whole and all there, and switching the file off and on under them
 //    never closes a handle a write is still using;
+//  - SeqlockValue (the GamePad's motion, retro_run to the guest): a reader
+//    never sees half of one sample and half of another;
+//  - MpscList (the GamePad's rumble requests, the guest to retro_run): every
+//    item arrives, each producer's in the order pushed;
+//  - LibretroVkQueue: the frontend's queue lock is always released through
+//    the interface it was taken through, while the frontend swaps interfaces
+//    under a submitting GPU thread, and a frame that hands over the same
+//    interface again does not wait;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -31,6 +39,11 @@
 #include "util/helpers/ThreadStartedFlag.h"
 #include "util/helpers/EventWake.h"
 #include "Cemu/Logging/LogFileSink.h"
+#include "util/helpers/SeqlockValue.h"
+#include "util/helpers/MpscList.h"
+#include "libretro/LibretroVkQueue.h"
+#include "libretro.h"
+#include "libretro_vulkan.h"
 #include <fstream>
 #include <string>
 #include "libretro/LibretroAudioRing.h"
@@ -499,6 +512,128 @@ static void TestLogFileSink()
 	std::filesystem::remove(path, ec);
 }
 
+// --- input and rumble handoffs -------------------------------------------
+
+struct SeqlockTestValue
+{
+	uint64_t a, b, c, d, e, f, g; // all equal, always
+};
+
+static void TestSeqlockValue()
+{
+	SeqlockValue<SeqlockTestValue> value;
+	std::atomic_bool stop{false};
+	std::atomic_bool torn{false};
+	std::vector<std::thread> readers;
+	for (int r = 0; r < 3; r++)
+		readers.emplace_back([&] {
+			uint64_t last = 0;
+			while (!stop.load(std::memory_order_relaxed))
+			{
+				const SeqlockTestValue v = value.Load();
+				if (v.a != v.b || v.a != v.c || v.a != v.d || v.a != v.e || v.a != v.f || v.a != v.g || v.a < last)
+					torn.store(true);
+				last = v.a;
+			}
+		});
+	for (uint64_t i = 1; i <= 200000; i++)
+		value.Store({i, i, i, i, i, i, i});
+	stop.store(true);
+	for (auto& t : readers)
+		t.join();
+	CHECK(!torn.load());
+	CHECK(value.Load().a == 200000);
+}
+
+static void TestMpscList()
+{
+	MpscList<std::pair<int, int>> list;
+	constexpr int kProducers = 4, kItems = 20000;
+	std::atomic<int> producersDone{0};
+	std::vector<std::thread> producers;
+	for (int p = 0; p < kProducers; p++)
+		producers.emplace_back([&, p] {
+			for (int i = 0; i < kItems; i++)
+				list.Push({p, i});
+			producersDone.fetch_add(1);
+		});
+	int next[kProducers] = {};
+	bool ordered = true;
+	int total = 0;
+	for (;;)
+	{
+		const bool done = producersDone.load() == kProducers;
+		list.TakeAll([&](std::pair<int, int>&& item) {
+			ordered = ordered && item.second == next[item.first];
+			next[item.first] = item.second + 1;
+			total++;
+		});
+		if (done)
+			break;
+		std::this_thread::yield();
+	}
+	for (auto& t : producers)
+		t.join();
+	list.TakeAll([&](std::pair<int, int>&&) { total++; });
+	CHECK(ordered);
+	CHECK(total == kProducers * kItems);
+}
+
+// Two fake frontends' interfaces: each counts its own lock_queue/unlock_queue
+struct FakeVkFrontend
+{
+	std::atomic<int> held{0};
+	std::atomic<bool> bad{false};
+	retro_hw_render_interface_vulkan iface{};
+};
+
+static void FakeLockQueue(void* handle)
+{
+	auto* f = static_cast<FakeVkFrontend*>(handle);
+	if (f->held.fetch_add(1) != 0)
+		f->bad.store(true); // one submitting thread: never held twice
+}
+
+static void FakeUnlockQueue(void* handle)
+{
+	auto* f = static_cast<FakeVkFrontend*>(handle);
+	if (f->held.fetch_sub(1) != 1)
+		f->bad.store(true); // released through one it was not taken through
+}
+
+static void TestVkQueueLock()
+{
+	FakeVkFrontend a, b;
+	for (FakeVkFrontend* f : {&a, &b})
+	{
+		f->iface.interface_type = RETRO_HW_RENDER_INTERFACE_VULKAN;
+		f->iface.handle = f;
+		f->iface.lock_queue = FakeLockQueue;
+		f->iface.unlock_queue = FakeUnlockQueue;
+	}
+	LibretroVkQueue::SetInterface(&a.iface);
+	std::atomic_bool stop{false};
+	std::atomic<uint64_t> submits{0};
+	std::thread gpu([&] {
+		while (!stop.load(std::memory_order_relaxed))
+		{
+			LibretroVkQueue::Lock lock;
+			submits.fetch_add(1, std::memory_order_relaxed);
+		}
+	});
+	// The frontend, each frame: usually the same interface (no wait at all),
+	// now and then a rebuilt one, or none
+	const void* sequence[] = {&a.iface, &a.iface, &a.iface, &b.iface, &b.iface, nullptr, &a.iface};
+	for (int frame = 0; frame < 20000; frame++)
+		LibretroVkQueue::SetInterface(sequence[frame % 7]);
+	stop.store(true);
+	gpu.join();
+	LibretroVkQueue::SetInterface(nullptr);
+	CHECK(!a.bad.load() && !b.bad.load());
+	CHECK(a.held.load() == 0 && b.held.load() == 0);
+	CHECK(submits.load() > 0);
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -710,6 +845,9 @@ int main()
 	TestThreadStartedFlag();
 	TestEventWake();
 	TestLogFileSink();
+	TestSeqlockValue();
+	TestMpscList();
+	TestVkQueueLock();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

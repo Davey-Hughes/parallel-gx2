@@ -73,6 +73,8 @@
 
 #include "util/crypto/aes128.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/SeqlockValue.h"
+#include "util/helpers/MpscList.h"
 
 #include "Cafe/Filesystem/FST/FST.h"
 #include "Cafe/Filesystem/FST/KeyCache.h"
@@ -1538,9 +1540,11 @@ static LibretroPortState s_port_state[kLibretroMaxPorts];
 // the guest reads the latest sample.
 static retro_sensor_interface s_sensor_interface{};
 static bool s_motion_active = false;
+// The handler and the clock are retro_run's thread's alone; the sample is
+// handed to the guest's threads through a SeqlockValue, so a VPADRead on the
+// emulated CPU and the frame that samples the sensors never wait on each other
 static WiiUMotionHandler s_motion_handler;
-static MotionSample s_motion_sample;
-static std::mutex s_motion_mutex;
+static SeqlockValue<MotionSample> s_motion_sample;
 static std::chrono::steady_clock::time_point s_motion_last{};
 
 static void libretro_set_motion(bool want)
@@ -1566,9 +1570,8 @@ static void libretro_set_motion(bool want)
 			s_sensor_interface.set_sensor_state(0, RETRO_SENSOR_ACCELEROMETER_DISABLE, 0);
 			s_sensor_interface.set_sensor_state(0, RETRO_SENSOR_GYROSCOPE_DISABLE, 0);
 		}
-		std::lock_guard<std::mutex> lock(s_motion_mutex);
 		s_motion_handler = {};
-		s_motion_sample = {};
+		s_motion_sample.Store(MotionSample{});
 		s_motion_last = {};
 		return;
 	}
@@ -1589,14 +1592,13 @@ static void libretro_poll_motion()
 	const float gx = get(RETRO_SENSOR_GYROSCOPE_X), gy = get(RETRO_SENSOR_GYROSCOPE_Y),
 		gz = get(RETRO_SENSOR_GYROSCOPE_Z);
 	const auto now = std::chrono::steady_clock::now();
-	std::lock_guard<std::mutex> lock(s_motion_mutex);
 	const float dt = s_motion_last == std::chrono::steady_clock::time_point{}
 		? 1.0f / 60.0f
 		: std::chrono::duration<float>(now - s_motion_last).count();
 	s_motion_last = now;
 	s_motion_handler.processMotionSample(std::clamp(dt, 0.0001f, 0.25f),
 		gx, -gy, -gz, -ax, ay, az);
-	s_motion_sample = s_motion_handler.getMotionSample();
+	s_motion_sample.Store(s_motion_handler.getMotionSample());
 }
 
 // For vpad.cpp: the GamePad's motion, false when GamePad Motion is off or
@@ -1605,8 +1607,7 @@ bool libretro_get_gamepad_motion(MotionSample& out)
 {
 	if (!s_motion_active)
 		return false;
-	std::lock_guard<std::mutex> lock(s_motion_mutex);
-	out = s_motion_sample;
+	out = s_motion_sample.Load();
 	return true;
 }
 
@@ -1628,7 +1629,17 @@ static std::atomic<uint16_t> s_rumble_strength{0xFFFF};
 static std::atomic<bool> s_port_rumble[kLibretroMaxPorts]{};
 static uint16_t s_rumble_sent[kLibretroMaxPorts]{};
 
-static std::mutex s_vpad_rumble_mutex;
+// The guest's threads ask (push a pattern, clear), retro_run's thread plays:
+// the requests go through an MpscList, drained once a frame into the queue
+// below, which is retro_run's alone - no lock on either side. The count is how
+// many patterns are queued or on their way, for the guest's limit of five.
+struct VpadRumbleRequest
+{
+	bool clear;
+	std::vector<bool> steps;
+};
+static MpscList<VpadRumbleRequest> s_vpad_rumble_requests;
+static std::atomic<int> s_vpad_rumble_count{0};
 static std::deque<std::vector<bool>> s_vpad_rumble_queue;
 static size_t s_vpad_rumble_bit = 0;
 static bool s_vpad_rumble_on = false;
@@ -1652,20 +1663,28 @@ bool libretro_vpad_rumble_push(const uint8* pattern, uint8 length)
 		for (int j = 0; j < 8 && j < len; j += 2)
 			steps.push_back((p & (3 << j)) != 0);
 	}
-	std::lock_guard lock(s_vpad_rumble_mutex);
-	if (s_vpad_rumble_queue.size() >= 5)
-		return false;
-	if (s_vpad_rumble_queue.empty())
-		s_vpad_rumble_next = {};
-	s_vpad_rumble_queue.push_back(std::move(steps));
+	int count = s_vpad_rumble_count.load(std::memory_order_relaxed);
+	do
+	{
+		if (count >= 5)
+			return false;
+	} while (!s_vpad_rumble_count.compare_exchange_weak(count, count + 1, std::memory_order_relaxed));
+	s_vpad_rumble_requests.Push({false, std::move(steps)});
 	return true;
 }
 
 void libretro_vpad_rumble_clear()
 {
-	std::lock_guard lock(s_vpad_rumble_mutex);
-	s_vpad_rumble_queue.clear();
-	s_vpad_rumble_bit = 0;
+	s_vpad_rumble_count.store(0, std::memory_order_relaxed);
+	s_vpad_rumble_requests.Push({true, {}});
+}
+
+// One pattern done or dropped by a clear's count already: never below zero
+static void libretro_vpad_rumble_pattern_done()
+{
+	int count = s_vpad_rumble_count.load(std::memory_order_relaxed);
+	while (count > 0 && !s_vpad_rumble_count.compare_exchange_weak(count, count - 1, std::memory_order_relaxed))
+		;
 }
 
 void libretro_set_port_rumble(uint32_t port, bool on)
@@ -1677,7 +1696,17 @@ void libretro_set_port_rumble(uint32_t port, bool on)
 // The GamePad motor's state for this frame.
 static bool libretro_vpad_rumble_step()
 {
-	std::lock_guard lock(s_vpad_rumble_mutex);
+	s_vpad_rumble_requests.TakeAll([](VpadRumbleRequest&& request) {
+		if (request.clear)
+		{
+			s_vpad_rumble_queue.clear();
+			s_vpad_rumble_bit = 0;
+			return;
+		}
+		if (s_vpad_rumble_queue.empty())
+			s_vpad_rumble_next = {};
+		s_vpad_rumble_queue.push_back(std::move(request.steps));
+	});
 	if (s_vpad_rumble_queue.empty())
 	{
 		s_vpad_rumble_bit = 0;
@@ -1694,6 +1723,7 @@ static bool libretro_vpad_rumble_step()
 	{
 		s_vpad_rumble_queue.pop_front();
 		s_vpad_rumble_bit = 0;
+		libretro_vpad_rumble_pattern_done();
 	}
 	return s_vpad_rumble_on;
 }

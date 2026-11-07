@@ -22,6 +22,10 @@
 # thread that logs - the GPU thread, the emulated CPU's, a crash handler -
 # queues on a mutex for it, or waits on one a crashed thread holds.
 #
+# Nor do the per-frame handoffs between retro_run and the other threads: the
+# frontend's Vulkan queue lock (LibretroVkQueue, every submit and every
+# frame), the GamePad's motion and its rumble requests.
+#
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
 # the clock. Each of them used to check every 1 to 50 ms, and the boot paid for
@@ -103,11 +107,16 @@ fi
 if pp src/Cafe/IOSU/nn/boss/boss_service.cpp | grep -q 'm_taskState = TaskState::'; then
 	echo "boss_service.cpp: a task changes state without notifying"; fail=1
 fi
-for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h; do
-	if pp $f | grep -qE 'std::(recursive_|shared_)?mutex|condition_variable|sleep_for'; then
-		echo "$f: logging takes a lock or sleeps again"; fail=1
+for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
+	src/libretro/LibretroVkQueue.cpp src/libretro/LibretroVkQueue.h \
+	src/util/helpers/SeqlockValue.h src/util/helpers/MpscList.h; do
+	if pp $f | grep -qE 'std::[a-z_]*mutex|condition_variable|sleep_for'; then
+		echo "$f: takes a lock or sleeps again"; fail=1
 	fi
 done
+if pp src/libretro/CemuLibretro.cpp | grep -qE 's_motion_mutex|s_vpad_rumble_mutex'; then
+	echo "CemuLibretro.cpp: the motion or rumble handoff takes a lock again"; fail=1
+fi
 if pp src/libretro/CemuLibretro.cpp | grep -q 'libretro_gpu_wait_step'; then
 	echo "CemuLibretro.cpp: a GPU wait still steps a millisecond at a time"; fail=1
 fi
@@ -147,5 +156,5 @@ if ! body src/Cafe/OS/libs/TCL/TCL.cpp 'int TCLSubmitToRing\(' | grep -q LatteGp
 	echo "TCLSubmitToRing does not wake the GPU thread"; fail=1
 fi
 
-[ $fail -eq 0 ] && echo "GPU, boot, title scan and IOSU waits sleep until woken, none by the clock or spinning; logging takes no lock"
+[ $fail -eq 0 ] && echo "GPU, boot, title scan and IOSU waits sleep until woken, none by the clock or spinning; logging and the per-frame handoffs take no lock"
 exit $fail

@@ -1,7 +1,5 @@
 #pragma once
 
-#include <shared_mutex>
-
 /*
  * The frontend's queue lock.
  *
@@ -18,14 +16,15 @@ namespace LibretroVkQueue
 	// The retro_hw_render_interface_vulkan, or nullptr when not running under a
 	// libretro frontend. Taken as void* so the renderer needs no libretro
 	// headers. Safe to call from the frontend thread while a submit is in
-	// flight.
+	// flight: when the interface changes, it returns once the submits that
+	// took the queue lock through the old one have released it.
 	void SetInterface(const void* hwRenderInterfaceVulkan);
 
 	// Holds the frontend's queue lock for as long as it is in scope, and does
-	// nothing at all when there is no interface. The shared lock is what stops
-	// the interface being retired between taking the lock and releasing it -
-	// releasing through a different interface than it was taken from is how
-	// this goes wrong quietly.
+	// nothing at all when there is no interface. Counted in flight for as long
+	// as it lives, which is what stops the interface being retired between
+	// taking the queue lock and releasing it - releasing through a different
+	// interface than it was taken from is how this goes wrong quietly.
 	class Lock
 	{
 	public:
@@ -35,7 +34,6 @@ namespace LibretroVkQueue
 		Lock& operator=(const Lock&) = delete;
 
 	private:
-		std::shared_lock<std::shared_timed_mutex> m_guard;
 		const void* m_iface;
 	};
 } // namespace LibretroVkQueue
