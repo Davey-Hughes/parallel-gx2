@@ -6,7 +6,6 @@
 
 #include <imgui.h>
 #include "imgui/imgui_extension.h"
-#include <png.h>
 
 #include "config/ActiveSettings.h"
 

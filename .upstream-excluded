@@ -33,3 +33,17 @@ BUILD.md
 CONTRIBUTING.md
 CODING_STYLE.md
 boost.natvis
+:(glob)CMakeLists.txt
+:(glob)**/CMakeLists.txt
+CMakePresets.json
+cmake
+vcpkg.json
+dependencies/vcpkg
+dependencies/vcpkg_overlay_ports
+dependencies/vcpkg_overlay_ports_linux
+dependencies/vcpkg_overlay_ports_mac
+dependencies/vcpkg_overlay_ports_webos
+dependencies/vcpkg_overlay_ports_win
+dependencies/vcpkg_triplets
+src/Cemu/Tools/DownloadManager
+src/util/helpers/ZipArchive.h

@@ -15,7 +15,7 @@
 #include "util/helpers/helpers.h"
 #include "config/ActiveSettings.h"
 
-#include <openssl/sha.h>
+#include "util/crypto/sha.h"
 
 static bool g_compilePipelineThreadInit{false};
 static std::mutex g_compilePipelineMutex;

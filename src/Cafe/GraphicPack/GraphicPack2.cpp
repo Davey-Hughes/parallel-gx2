@@ -2,7 +2,6 @@
 #include "Cafe/Filesystem/fsc.h"
 #include "config/CemuConfig.h"
 #include "config/ActiveSettings.h"
-#include "openssl/sha.h"
 #include "boost/algorithm/string.hpp"
 #include "util/helpers/MapAdaptor.h"
 #include "util/helpers/StringParser.h"

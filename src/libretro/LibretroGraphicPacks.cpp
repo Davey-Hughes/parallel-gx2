@@ -1,13 +1,15 @@
 #include "LibretroGraphicPacks.h"
 
 #include <cstring>
-#include <zip.h>
+#include <zlib.h>
 
 #include "config/ActiveSettings.h"
 #include "Common/FileStream.h"
 
-extern const unsigned char g_libretro_graphic_packs_zip[];
-extern const std::size_t g_libretro_graphic_packs_zip_size;
+// tools/pack_graphic_packs.c writes these
+extern const unsigned char g_libretro_graphic_packs[];
+extern const std::size_t g_libretro_graphic_packs_size;
+extern const std::size_t g_libretro_graphic_packs_unpacked_size;
 extern const char g_libretro_graphic_packs_version[];
 
 namespace
@@ -29,7 +31,7 @@ namespace
 // this never touches (see libretro_load_graphic_packs).
 void LibretroGraphicPacks_InstallBundled()
 {
-	if (g_libretro_graphic_packs_zip_size == 0)
+	if (g_libretro_graphic_packs_size == 0)
 		return;
 
 	const fs::path target = ActiveSettings::GetUserDataPath("graphicPacks");
@@ -38,15 +40,12 @@ void LibretroGraphicPacks_InstallBundled()
 	if (readFirstLine(versionFile) == version)
 		return;
 
-	zip_error_t error;
-	zip_error_init(&error);
-	zip_source_t* src = zip_source_buffer_create(g_libretro_graphic_packs_zip, g_libretro_graphic_packs_zip_size, 0, &error);
-	zip_t* za = src ? zip_open_from_source(src, ZIP_RDONLY, &error) : nullptr;
-	if (!za)
+	// the archive is a run of entries: path, NUL, size (4 bytes LE), data
+	std::vector<uint8> archive(g_libretro_graphic_packs_unpacked_size);
+	uLongf archiveLen = (uLongf)archive.size();
+	if (uncompress(archive.data(), &archiveLen, g_libretro_graphic_packs, (uLong)g_libretro_graphic_packs_size) != Z_OK
+			|| archiveLen != archive.size())
 	{
-		if (src)
-			zip_source_free(src);
-		zip_error_fini(&error);
 		cemuLog_log(LogType::Force, "graphic packs: the set compiled into the core could not be opened");
 		return;
 	}
@@ -56,45 +55,32 @@ void LibretroGraphicPacks_InstallBundled()
 		fs::remove_all(entry.path(), ec);
 	fs::create_directories(target, ec);
 
-	const sint64 numEntries = zip_get_num_entries(za, 0);
-	std::vector<uint8> buffer;
 	uint32 written = 0;
-	for (sint64 i = 0; i < numEntries; i++)
+	size_t pos = 0;
+	while (pos < archive.size())
 	{
-		zip_stat_t sb{};
-		if (zip_stat_index(za, i, 0, &sb) != 0 || !sb.name)
+		const char* name = (const char*)archive.data() + pos;
+		const size_t nameLen = strnlen(name, archive.size() - pos);
+		if (pos + nameLen + 5 > archive.size())
+			break;
+		pos += nameLen + 1;
+		const uint32 size = archive[pos] | (archive[pos + 1] << 8) | (archive[pos + 2] << 16) | ((uint32)archive[pos + 3] << 24);
+		pos += 4;
+		if (size > archive.size() - pos)
+			break;
+		const uint8* data = archive.data() + pos;
+		pos += size;
+		if (nameLen == 0 || std::strstr(name, "../") || std::strstr(name, "..\\") || name[0] == '/')
 			continue;
-		if (std::strstr(sb.name, "../") || std::strstr(sb.name, "..\\") || sb.name[0] == '/')
-			continue;
-		const size_t nameLen = std::strlen(sb.name);
-		if (nameLen == 0 || std::strcmp(sb.name, "./") == 0)
-			continue;
-		const fs::path path = target / _utf8ToPath(sb.name);
-		if (sb.name[nameLen - 1] == '/')
+		const fs::path path = target / _utf8ToPath(name);
+		fs::create_directories(path.parent_path(), ec);
+		std::unique_ptr<FileStream> out(FileStream::createFile2(path));
+		if (out)
 		{
-			fs::create_directories(path, ec);
-			continue;
+			out->writeData(data, size);
+			written++;
 		}
-		if (sb.size == 0)
-			continue; // directories without the trailing slash, and empty files
-		zip_file_t* zipFile = zip_fopen_index(za, i, 0);
-		if (!zipFile)
-			continue;
-		buffer.resize(sb.size);
-		if (zip_fread(zipFile, buffer.data(), sb.size) == (zip_int64_t)sb.size)
-		{
-			fs::create_directories(path.parent_path(), ec);
-			std::unique_ptr<FileStream> out(FileStream::createFile2(path));
-			if (out)
-			{
-				out->writeData(buffer.data(), buffer.size());
-				written++;
-			}
-		}
-		zip_fclose(zipFile);
 	}
-	zip_discard(za);
-	zip_error_fini(&error);
 
 	std::unique_ptr<FileStream> file(FileStream::createFile2(versionFile));
 	if (file)

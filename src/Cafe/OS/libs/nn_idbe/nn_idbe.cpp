@@ -3,7 +3,7 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Cafe/OS/libs/nn_common.h"
 #include "util/crypto/aes128.h"
-#include "openssl/sha.h"
+#include "util/crypto/sha.h"
 #include "Cemu/napi/napi.h"
 #include "config/ActiveSettings.h"
 

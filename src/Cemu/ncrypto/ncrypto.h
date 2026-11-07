@@ -2,11 +2,6 @@
 
 enum class CafeConsoleRegion;
 
-/* OpenSSL forward declarations */
-typedef struct ec_key_st EC_KEY;
-typedef struct ec_point_st EC_POINT;
-typedef struct ECDSA_SIG_st ECDSA_SIG;
-
 namespace NCrypto
 {
 	/* Base 64 */
@@ -31,8 +26,7 @@ namespace NCrypto
 	{
 		uint8 keyData[30];
 
-		void setPrivateKey(EC_KEY* key);
-		EC_KEY* getPrivateKey() const;
+		[[nodiscard]] static ECCPrivKey generate();
 
 		static ECCPrivKey getDeviceCertPrivateKey();
 	};
@@ -42,8 +36,8 @@ namespace NCrypto
 		uint8 x[30];
 		uint8 y[30];
 
-		EC_KEY* getPublicKey();
-		EC_POINT* getPublicKeyAsPoint();
+		/* 0x04 || x || y, as libretro-common's b233_* take it */
+		void getPoint(uint8* point) const;
 
 		[[nodiscard]] static ECCPubKey generateFromPrivateKey(ECCPrivKey& privKey);
 	};
@@ -52,9 +46,6 @@ namespace NCrypto
 	{
 		uint8 r[30];
 		uint8 s[30];
-
-		ECDSA_SIG* getSignature();
-		void setSignature(ECDSA_SIG* sig);
 
 		bool doesMatch(ECCSig& otherSig) const
 		{
@@ -206,6 +197,7 @@ namespace NCrypto
 
 	void GenerateHashSHA256(const void* data, size_t len, CHash256& hashOut);
 	ECCSig signHash(uint32 signerTitleIdHigh, uint32 signerTitleIdLow, uint8* hash, sint32 hashLen, CertECC& certChainOut);
+	bool verifyHashSignature(uint8* hash, sint32 hashLen, ECCPubKey& certChainPubKey, ECCSig& sig);
 
 	uint32 GetDeviceId();
 	std::string GetSerial();

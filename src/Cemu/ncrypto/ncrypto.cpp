@@ -3,12 +3,9 @@
 #include "util/helpers/helpers.h"
 #include "config/CemuConfig.h"
 
-#include "openssl/bn.h"
-#include "openssl/ec.h"
-#include "openssl/x509.h"
-#include "openssl/ssl.h"
-#include "openssl/sha.h"
-#include "openssl/ecdsa.h"
+#include <lrc_hash.h>
+#include <crypto/pk.h>
+#include <crypto/kdf.h>
 
 #include "util/crypto/aes128.h"
 
@@ -157,12 +154,15 @@ namespace NCrypto
 
 	void GenerateHashSHA1(const void* data, size_t len, CHash160& hashOut)
 	{
-		SHA1((const unsigned char*) data, len, hashOut.b);
+		SHA1Digest((const uint8_t*)data, len, hashOut.b);
 	}
 
 	void GenerateHashSHA256(const void* data, size_t len, CHash256& hashOut)
 	{
-		SHA256((const unsigned char*) data, len, hashOut.b);
+		struct sha256_state st;
+		sha256_stream_init(&st, 0);
+		sha256_stream_update(&st, (const uint8_t*)data, len);
+		sha256_stream_final(&st, hashOut.b);
 	}
 
 	/* Ticket */
@@ -359,14 +359,12 @@ namespace NCrypto
 		}
 
 		// decrypt personalized titlekey
-		EC_KEY* ec_privKey = devicePrivKey.getPrivateKey();
-		EC_POINT* ec_publicKey = ticketParser.m_publicKey.getPublicKeyAsPoint();
-
-		uint8 sharedKey[128]{};
-		int sharedKeyLen = ECDH_compute_key(sharedKey, sizeof(sharedKey), ec_publicKey, ec_privKey, nullptr);
-		cemu_assert(sharedKeyLen > 16);
-		EC_KEY_free(ec_privKey);
-		EC_POINT_free(ec_publicKey);
+		uint8 peer[B233_POINT_SIZE];
+		uint8 sharedKey[B233_SCALAR_SIZE];
+		ticketParser.m_publicKey.getPoint(peer);
+		if (b233_ecdh(devicePrivKey.keyData, peer, sharedKey) != 0)
+			return false;
+		const int sharedKeyLen = sizeof(sharedKey);
 
 		NCrypto::CHash160 sharedKeySHA1;
 		NCrypto::GenerateHashSHA1(sharedKey, sharedKeyLen, sharedKeySHA1);
@@ -482,21 +480,14 @@ namespace NCrypto
 
 	/* ECC PrivateKey helper functions */
 
-	void ECCPrivKey::setPrivateKey(EC_KEY* key)
+	ECCPrivKey ECCPrivKey::generate()
 	{
-		const BIGNUM* bnPrivKey = EC_KEY_get0_private_key(key);
-		memset(this->keyData, 0, sizeof(this->keyData));
-		BN_bn2binpad(bnPrivKey, this->keyData, sizeof(this->keyData));
-	}
-
-	EC_KEY* ECCPrivKey::getPrivateKey() const
-	{
-		BIGNUM* bn_privKey = BN_new();
-		BN_bin2bn(this->keyData, sizeof(this->keyData), bn_privKey);
-		EC_KEY* ec_privKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-		EC_KEY_set_private_key(ec_privKey, bn_privKey);
-		BN_free(bn_privKey);
-		return ec_privKey;
+		ECCPrivKey key{};
+		uint8 pub[B233_POINT_SIZE];
+		do
+			crypto_random_bytes(key.keyData, sizeof(key.keyData));
+		while (b233_keygen(key.keyData, pub) != 0);
+		return key;
 	}
 
 	ECCPrivKey ECCPrivKey::getDeviceCertPrivateKey()
@@ -508,95 +499,23 @@ namespace NCrypto
 
 	/* ECC PublicKey helper functions */
 
-	EC_KEY* ECCPubKey::getPublicKey()
+	void ECCPubKey::getPoint(uint8* point) const
 	{
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		BN_bin2bn(this->x, sizeof(this->x), bn_x);
-		BN_bin2bn(this->y, sizeof(this->y), bn_y);
-
-		EC_KEY* ec_pubKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-		int r = EC_KEY_set_public_key_affine_coordinates(ec_pubKey, bn_x, bn_y);
-
-		BN_free(bn_x);
-		BN_free(bn_y);
-
-		return ec_pubKey;
-	}
-
-	EC_POINT* ECCPubKey::getPublicKeyAsPoint()
-	{
-		BN_CTX* ctx = BN_CTX_new();
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		BN_bin2bn(this->x, sizeof(this->x), bn_x);
-		BN_bin2bn(this->y, sizeof(this->y), bn_y);
-		EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-		EC_POINT* pubkey = EC_POINT_new(group);
-		EC_POINT_set_affine_coordinates(group, pubkey, bn_x, bn_y, ctx);
-		EC_GROUP_free(group);
-		BN_CTX_free(ctx);
-		BN_free(bn_x);
-		BN_free(bn_y);
-		return pubkey;
+		point[0] = 0x04;
+		memcpy(point + 1, this->x, sizeof(this->x));
+		memcpy(point + 1 + sizeof(this->x), this->y, sizeof(this->y));
 	}
 
 	ECCPubKey ECCPubKey::generateFromPrivateKey(ECCPrivKey& privKey)
 	{
-		BIGNUM* bn_privKey = BN_new();
-		BN_bin2bn(privKey.keyData, sizeof(privKey.keyData), bn_privKey);
-
-		// gen public key from private key
-		EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-		EC_POINT* pubkey = EC_POINT_new(group);
-		EC_POINT_mul(group, pubkey, bn_privKey, NULL, NULL, NULL);
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		EC_POINT_get_affine_coordinates(group, pubkey, bn_x, bn_y, NULL);
-
-		// store public key
-		ECCPubKey genPubKey;
-		BN_bn2binpad(bn_x, genPubKey.x, sizeof(genPubKey.x));
-		BN_bn2binpad(bn_y, genPubKey.y, sizeof(genPubKey.y));
-	
-		// clean up and return
-		EC_POINT_free(pubkey);
-		BN_free(bn_y);
-		BN_free(bn_x);
-		BN_free(bn_privKey);
-
+		uint8 point[B233_POINT_SIZE];
+		ECCPubKey genPubKey{};
+		if (b233_keygen(privKey.keyData, point) == 0)
+		{
+			memcpy(genPubKey.x, point + 1, sizeof(genPubKey.x));
+			memcpy(genPubKey.y, point + 1 + sizeof(genPubKey.x), sizeof(genPubKey.y));
+		}
 		return genPubKey;
-	}
-
-	/* Signature helper functions */
-
-	ECDSA_SIG* ECCSig::getSignature()
-	{
-		BIGNUM* bn_r = BN_new();
-		BIGNUM* bn_s = BN_new();
-		BN_bin2bn(this->r, 30, bn_r);
-		BN_bin2bn(this->s, 30, bn_s);
-
-		ECDSA_SIG* ec_sig = ECDSA_SIG_new();
-		ECDSA_SIG_set0(ec_sig, bn_r, bn_s); // ownership of bn_r and bn_s transferred to SIG as well, do not free manually
-
-		return ec_sig;
-	}
-
-	void ECCSig::setSignature(ECDSA_SIG* sig)
-	{
-		const BIGNUM* sig_r = nullptr, * sig_s = nullptr;
-		ECDSA_SIG_get0(sig, &sig_r, &sig_s);
-
-		sint32 lenR = BN_num_bytes(sig_r);
-		sint32 lenS = BN_num_bytes(sig_s);
-		cemu_assert_debug(lenR <= 30);
-		cemu_assert_debug(lenS <= 30);
-
-		memset(this->r, 0, sizeof(this->r));
-		memset(this->s, 0, sizeof(this->s));
-		BN_bn2binpad(sig_r, this->r, 30);
-		BN_bn2binpad(sig_s, this->s, 30);
 	}
 
 	/* Certificate */
@@ -617,37 +536,16 @@ namespace NCrypto
 
 	bool CertECC::verifySignatureViaPubKey(ECCPubKey& signerPubKey)
 	{
-		uint8 hash[SHA256_DIGEST_LENGTH];
-		SHA256((const unsigned char *) this->issuer, 0x100, hash);
-
-		EC_KEY* ecPubKey = signerPubKey.getPublicKey();
-		ECDSA_SIG* ecSig = this->signature.getSignature();
-
-		int r = ECDSA_do_verify(hash, sizeof(hash), ecSig, ecPubKey);
-
-		ECDSA_SIG_free(ecSig);
-		EC_KEY_free(ecPubKey);
-
-		return r == 1; // true if valid signature
+		CHash256 hash;
+		GenerateHashSHA256(this->issuer, 0x100, hash);
+		return verifyHashSignature(hash.b, sizeof(hash.b), signerPubKey, this->signature);
 	}
 
 	void CertECC::sign(ECCPrivKey& signerPrivKey)
 	{
-		uint8 hash[SHA256_DIGEST_LENGTH];
-		SHA256((const unsigned char *) this->issuer, 0x100, hash);
-
-		// generate signature
-		EC_KEY* ec_privKey = signerPrivKey.getPrivateKey();
-		ECDSA_SIG* sig = ECDSA_do_sign(hash, sizeof(hash), ec_privKey);
-		EC_KEY_free(ec_privKey);
-
-		// store signature
-		const BIGNUM* bn_r = nullptr, *bn_s = nullptr;
-		ECDSA_SIG_get0(sig, &bn_r, &bn_s);
-		BN_bn2binpad(bn_r, this->signature.r, sizeof(this->signature.r));
-		BN_bn2binpad(bn_s, this->signature.s, sizeof(this->signature.s));
-
-		ECDSA_SIG_free(sig);
+		CHash256 hash;
+		GenerateHashSHA256(this->issuer, 0x100, hash);
+		b233_ecdsa_sign(signerPrivKey.keyData, hash.b, sizeof(hash.b), this->signature.r, this->signature.s);
 	}
 
 	CertECC CertECC::GetDeviceCertificate()
@@ -688,54 +586,26 @@ namespace NCrypto
 	ECCSig signHash(uint32 signerTitleIdHigh, uint32 signerTitleIdLow, uint8* hash, sint32 hashLen, CertECC& certChainOut)
 	{
 		// generate key pair (we only care about the private key)
-		EC_KEY* ec_keyPair = EC_KEY_new_by_curve_name(NID_sect233r1);
-		EC_KEY_generate_key(ec_keyPair);
-
-		ECCPrivKey privKey;
-		privKey.setPrivateKey(ec_keyPair);
-
-		EC_KEY_free(ec_keyPair);
+		ECCPrivKey privKey = ECCPrivKey::generate();
 
 		// get public key and certificate
 		ECCPubKey pubKey;
 		ECCPrivKey signerPrivKey = ECCPrivKey::getDeviceCertPrivateKey();
 		certChainOut = CertECC::generateCertificate(signerTitleIdHigh, signerTitleIdLow, signerPrivKey, privKey, pubKey);
-		
+
 		// generate signature
 		cemu_assert_debug(hashLen == 32);
-		EC_KEY* ec_privKey = privKey.getPrivateKey();
-		ECDSA_SIG* sig = ECDSA_do_sign(hash, hashLen, ec_privKey);
-		EC_KEY_free(ec_privKey);
-
-		// verify
-		EC_KEY* ec_pubKey = pubKey.getPublicKey();
-		bool isValid = ECDSA_do_verify(hash, hashLen, sig, ec_pubKey) == 1;
-		EC_KEY_free(ec_pubKey);
-		cemu_assert(isValid);
-
-		// store signature
 		ECCSig eccSig;
-		const BIGNUM* bn_r = nullptr, * bn_s = nullptr;
-		ECDSA_SIG_get0(sig, &bn_r, &bn_s);
-		BN_bn2binpad(bn_r, eccSig.r, sizeof(eccSig.r));
-		BN_bn2binpad(bn_s, eccSig.s, sizeof(eccSig.s));
-
-		ECDSA_SIG_free(sig);
-
+		cemu_assert(b233_ecdsa_sign(privKey.keyData, hash, hashLen, eccSig.r, eccSig.s) == 0);
+		cemu_assert(verifyHashSignature(hash, hashLen, pubKey, eccSig));
 		return eccSig;
 	}
 
 	bool verifyHashSignature(uint8* hash, sint32 hashLen, ECCPubKey& certChainPubKey, ECCSig& sig)
 	{
-		EC_KEY* ec_pubKey = certChainPubKey.getPublicKey();
-
-		ECDSA_SIG* ecdsa_sig = sig.getSignature();
-
-		bool r = ECDSA_do_verify(hash, hashLen, ecdsa_sig, ec_pubKey) == 1;
-
-		EC_KEY_free(ec_pubKey);
-		ECDSA_SIG_free(ecdsa_sig);
-		return r;
+		uint8 point[B233_POINT_SIZE];
+		certChainPubKey.getPoint(point);
+		return b233_ecdsa_verify(point, hash, hashLen, sig.r, sig.s) == 0;
 	}
 
 	bool verifyCert(CertECC& cert, NCrypto::ECCPubKey& signerPubKey)

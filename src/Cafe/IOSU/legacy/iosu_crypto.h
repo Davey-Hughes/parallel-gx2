@@ -54,10 +54,11 @@ bool iosuCrypto_verifyCert(CertECC_t& cert);
 
 std::string iosuCrypto_base64Encode(unsigned char const* bytes_to_encode, unsigned int inputLen);
 
-// certificate store
-bool iosuCrypto_addClientCertificate(void* sslctx, sint32 certificateId);
-bool iosuCrypto_addCACertificate(void* sslctx, sint32 certificateId);
-bool iosuCrypto_addCustomCACertificate(void* sslctx, uint8* certData, sint32 certLength);
+// certificate store; tlsSettings is the curl_tls_settings a
+// CURLOPT_SSL_CTX_FUNCTION receives
+bool iosuCrypto_addClientCertificate(void* tlsSettings, sint32 certificateId);
+bool iosuCrypto_addCACertificate(void* tlsSettings, sint32 certificateId);
+bool iosuCrypto_addCustomCACertificate(void* tlsSettings, uint8* certData, sint32 certLength);
 
 uint8* iosuCrypto_getCertificateDataById(sint32 certificateId, sint32* certificateSize);
 uint8* iosuCrypto_getCertificatePrivateKeyById(sint32 certificateId, sint32* certificateSize);

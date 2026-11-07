@@ -3,10 +3,6 @@
 	url = https://github.com/WizzardSK/ZArchive
 	shallow = true
 	branch = vfs-file-access
-[submodule "dependencies/vcpkg"]
-	path = dependencies/vcpkg
-	url = https://github.com/microsoft/vcpkg
-	shallow = false
 [submodule "dependencies/Vulkan-Headers"]
 	path = dependencies/Vulkan-Headers
 	url = https://github.com/KhronosGroup/Vulkan-Headers
@@ -26,3 +22,24 @@
 	path = dependencies/cemu_graphic_packs
 	url = https://github.com/cemu-project/cemu_graphic_packs.git
 	shallow = true
+[submodule "dependencies/fmt"]
+	path = dependencies/fmt
+	url = https://github.com/fmtlib/fmt.git
+[submodule "dependencies/glm"]
+	path = dependencies/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "dependencies/pugixml"]
+	path = dependencies/pugixml
+	url = https://github.com/zeux/pugixml.git
+[submodule "dependencies/zlib"]
+	path = dependencies/zlib
+	url = https://github.com/madler/zlib.git
+[submodule "dependencies/zstd"]
+	path = dependencies/zstd
+	url = https://github.com/facebook/zstd.git
+[submodule "dependencies/glslang"]
+	path = dependencies/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+[submodule "dependencies/libusb"]
+	path = dependencies/libusb
+	url = https://github.com/libusb/libusb.git

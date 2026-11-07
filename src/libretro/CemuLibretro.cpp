@@ -1,7 +1,6 @@
 // Cemu libretro core - main implementation
 // Routes video/audio/input through libretro frontend callbacks
 
-#include <openssl/crypto.h>
 #include <algorithm>
 #include <cmath>
 #include <thread>
@@ -16,7 +15,7 @@
 #include "config/CemuConfig.h"
 #include "Cafe/Account/Account.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
-#include <openssl/crypto.h>
+#include <curl/curl.h>
 #include <boost/nowide/convert.hpp>
 #include "config/ActiveSettings.h"
 #include "config/LaunchSettings.h"
@@ -4066,12 +4065,8 @@ RETRO_API void retro_init()
 	// when it started crashing at core selection, before any content.
 	libretro_log(RETRO_LOG_INFO, "retro_init: start (%s)\n", BUILD_VERSION_WITH_NAME_STRING);
 
-	// OpenSSL without the system's openssl.cnf, before anything uses it. The
-	// config can load an engine (pkcs11 on Linux distributions), a library of
-	// the system's that stays loaded after the core is unloaded and keeps
-	// pointers into the first copy of the core's OpenSSL: the next content
-	// loaded in the same RetroArch then crashed in it (UTIL_CTX_set_module)
-	OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, nullptr);
+	// the network transfer thread, before anything transfers (curl_compat)
+	curl_global_init(CURL_GLOBAL_DEFAULT);
 
 	LibretroAudioAPI::SetAudioCallback([](const int16_t* data, size_t frames) -> size_t {
 		if (s_audio_submission_allowed && audio_batch_cb && data && frames > 0)
@@ -4170,7 +4165,7 @@ RETRO_API unsigned retro_api_version()
 
 RETRO_API void retro_get_system_info(struct retro_system_info* info)
 {
-	info->library_name = "Cemu";
+	info->library_name = "ParaLLEl GX2";
 	info->library_version = "2.6-372-g29f2f1fa";
 	info->need_fullpath = true;
 	// tmd: NUS/WUP dumps are a directory of .app files next to a title.tmd,
@@ -6699,12 +6694,9 @@ RETRO_API void retro_deinit()
 	// lock, which the thread needs in order to exit: the frontend hangs.
 	FileCache_StopAsyncWriter();
 
-	// What would otherwise keep this library loaded, or point into it once it
-	// is gone. OpenSSL is built with no-pinshared (the overlay port), so it
-	// no longer pins the library, and its cleanup runs here instead of at
-	// process exit, when the code would not be there any more. The crash
-	// handlers go back to the frontend's.
-	OPENSSL_cleanup();
+	// What would otherwise outlive this library: the network transfer
+	// thread is joined, and the crash handlers go back to the frontend's.
+	curl_global_cleanup();
 	ExceptionHandler_Shutdown();
 
 	s_initialized = false;

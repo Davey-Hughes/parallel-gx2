@@ -1,6 +1,8 @@
 #ifndef CEMU_NSYSHID_WHITELIST_H
 #define CEMU_NSYSHID_WHITELIST_H
 
+#include <list>
+
 namespace nsyshid
 {
 	class Whitelist {

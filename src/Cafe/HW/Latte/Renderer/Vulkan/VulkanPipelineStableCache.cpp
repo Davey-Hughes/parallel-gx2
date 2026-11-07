@@ -11,7 +11,7 @@
 #include "Cemu/FileCache/FileCache.h"
 #include "Cafe/HW/Latte/Core/LatteShaderCache.h"
 #include "util/helpers/helpers.h"
-#include <openssl/sha.h>
+#include "util/crypto/sha.h"
 
 struct
 {

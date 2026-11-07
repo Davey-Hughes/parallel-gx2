@@ -73,6 +73,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <functional>
 #include <chrono>
 #include <ctime>
 #include <regex>

@@ -3,7 +3,6 @@
 #include "Cemu/ncrypto/ncrypto.h"
 #include "Cafe/Filesystem/WUD/wud.h"
 #include "util/crypto/aes128.h"
-#include "openssl/sha.h" /* SHA1 / SHA256 */
 #include "fstUtil.h"
 
 #include "FST.h"
@@ -541,8 +540,7 @@ FSTVolume* FSTVolume::OpenFST(FSTDataSource* dataSource, uint64 fstOffset, uint3
 			// if unhashed mode, then initialize the hash context
 			if(cluster.hashMode == ClusterHashMode::RAW || cluster.hashMode == ClusterHashMode::RAW_STREAM)
 			{
-				cluster.singleHashCtx.reset(EVP_MD_CTX_new());
-				EVP_DigestInit_ex(cluster.singleHashCtx.get(), cluster.contentHashIsSHA1 ? EVP_sha1() : EVP_sha256(), nullptr);
+				cluster.singleHashCtx = std::make_unique<ShaStream>(cluster.contentHashIsSHA1);
 			}
 		}
 	}
@@ -1029,12 +1027,12 @@ FSTCachedRawBlock* FSTVolume::GetDecryptedRawBlock(uint32 clusterIndex, uint32 b
 			uint32 hashSize = m_sectorSize;
 			if(isLastBlock)
 				hashSize = cluster.contentSize - (uint64)blockIndex*m_sectorSize;
-			EVP_DigestUpdate(cluster.singleHashCtx.get(), block->blockData.rawData.data(), hashSize);
+			cluster.singleHashCtx->Update(block->blockData.rawData.data(), hashSize);
 			cluster.singleHashNumBlocksHashed++;
 			if(isLastBlock)
 			{
 				uint8 hash[32];
-				EVP_DigestFinal_ex(cluster.singleHashCtx.get(), hash, nullptr);
+				cluster.singleHashCtx->Final(hash);
 				if(memcmp(hash, cluster.contentHash32, cluster.contentHashIsSHA1 ? 20 : 32) != 0)
 				{
 					cemuLog_log(LogType::Force, "FST: Raw section hash mismatch");
@@ -1230,8 +1228,7 @@ bool FSTVerifier::VerifyContentFile(VFSFileStream* fileContent, const NCrypto::A
 	uint64 remainingBytes = contentSize;
 	uint8 calculatedHash[SHA256_DIGEST_LENGTH];
 
-	EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-	EVP_DigestInit(ctx, isSHA1 ? EVP_sha1() : EVP_sha256());
+	ShaStream ctx(isSHA1);
 
 	while (remainingBytes > 0)
 	{
@@ -1241,13 +1238,11 @@ bool FSTVerifier::VerifyContentFile(VFSFileStream* fileContent, const NCrypto::A
 		if (bytesRead != bytesToReadPadded)
 			return false;
 		AES128_CBC_decrypt_updateIV(buffer.data(), buffer.data(), bytesToReadPadded, key->b, iv);
-		EVP_DigestUpdate(ctx, buffer.data(), bytesToRead);
+		ctx.Update(buffer.data(), bytesToRead);
 		remainingBytes -= bytesToRead;
 	}
-	unsigned int md_len;
-	EVP_DigestFinal_ex(ctx, calculatedHash, &md_len);
-	EVP_MD_CTX_free(ctx);
-	return memcmp(calculatedHash, tmdContentHash, md_len) == 0;
+	ctx.Final(calculatedHash);
+	return memcmp(calculatedHash, tmdContentHash, ctx.Size()) == 0;
 }
 
 bool FSTVerifier::VerifyHashedContentFile(VFSFileStream* fileContent, const NCrypto::AesKey* key, uint32 contentIndex, uint32 contentSize, uint32 contentSizePadded, bool isSHA1, const uint8* tmdContentHash)

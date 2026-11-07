@@ -7,7 +7,7 @@
 #include "Cafe/IOSU/legacy/iosu_crypto.h"
 
 #include "Cemu/ncrypto/ncrypto.h"
-#include "openssl/sha.h"
+#include "util/crypto/sha.h"
 #include "util/crypto/aes128.h"
 #include "util/helpers/StringHelpers.h"
 #include "config/ActiveSettings.h"

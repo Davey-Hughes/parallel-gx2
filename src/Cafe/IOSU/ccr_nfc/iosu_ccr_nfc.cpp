@@ -1,8 +1,7 @@
 #include "iosu_ccr_nfc.h"
 #include "Cafe/IOSU/kernel/iosu_kernel.h"
 #include "util/crypto/aes128.h"
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
+#include "util/crypto/sha.h"
 
 namespace iosu
 {
@@ -104,7 +103,7 @@ namespace iosu
 				counter++;
 
 				uint32 dataSize = outSize;
-				if (!HMAC(EVP_sha256(), hmacKey, hmacKeySize, buffer, sizeof(buffer), outData, &dataSize))
+				if (!HMAC_SHA256(hmacKey, hmacKeySize, buffer, sizeof(buffer), outData, &dataSize))
 				{
 					return CCR_NFC_ERROR;
 				}
@@ -230,7 +229,7 @@ namespace iosu
 				uint8 hmacBuffer[0x20];
 				uint32 hmacLen = sizeof(hmacBuffer);
 
-				if (!HMAC(EVP_sha256(), sLockedSecretInternalHmacKey, sizeof(sLockedSecretInternalHmacKey), out->data + in->lockedSecretHmacOffset + 0x20, (in->dataSize - in->lockedSecretHmacOffset) - 0x20, hmacBuffer, &hmacLen))
+				if (!HMAC_SHA256(sLockedSecretInternalHmacKey, sizeof(sLockedSecretInternalHmacKey), out->data + in->lockedSecretHmacOffset + 0x20, (in->dataSize - in->lockedSecretHmacOffset) - 0x20, hmacBuffer, &hmacLen))
 				{
 					return CCR_NFC_ERROR;
 				}
@@ -243,12 +242,12 @@ namespace iosu
 				if (in->version == 0)
 				{
 					hmacLen = sizeof(hmacBuffer);
-					res = HMAC(EVP_sha256(), sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x20, (in->dataSize - in->unfixedInfosHmacOffset) - 0x20, hmacBuffer, &hmacLen) ? 0 : CCR_NFC_ERROR;
+					res = HMAC_SHA256(sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x20, (in->dataSize - in->unfixedInfosHmacOffset) - 0x20, hmacBuffer, &hmacLen) ? 0 : CCR_NFC_ERROR;
 				}
 				else
 				{
 					hmacLen = sizeof(hmacBuffer);
-					res = HMAC(EVP_sha256(), sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x21, (in->dataSize - in->unfixedInfosHmacOffset) - 0x21, hmacBuffer, &hmacLen) ? 0 : CCR_NFC_ERROR;
+					res = HMAC_SHA256(sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x21, (in->dataSize - in->unfixedInfosHmacOffset) - 0x21, hmacBuffer, &hmacLen) ? 0 : CCR_NFC_ERROR;
 				}
 
 				if (memcmp(in->data + in->unfixedInfosHmacOffset, hmacBuffer, 0x20) != 0)
@@ -261,7 +260,7 @@ namespace iosu
 				uint8 hmacBuffer[0x20];
 				uint32 hmacLen = sizeof(hmacBuffer);
 
-				if (!HMAC(EVP_sha256(), sLockedSecretInternalHmacKey, sizeof(sLockedSecretInternalHmacKey), out->data + in->lockedSecretHmacOffset + 0x20, (in->dataSize - in->lockedSecretHmacOffset) - 0x20, hmacBuffer, &hmacLen))
+				if (!HMAC_SHA256(sLockedSecretInternalHmacKey, sizeof(sLockedSecretInternalHmacKey), out->data + in->lockedSecretHmacOffset + 0x20, (in->dataSize - in->lockedSecretHmacOffset) - 0x20, hmacBuffer, &hmacLen))
 				{
 					return CCR_NFC_ERROR;
 				}
@@ -275,7 +274,7 @@ namespace iosu
 				if (in->version == 0)
 				{
 					uint32 hmacLen = 0x20;
-					if (!HMAC(EVP_sha256(), sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x20, (in->dataSize - in->unfixedInfosHmacOffset) - 0x20, out->data + in->unfixedInfosHmacOffset, &hmacLen))
+					if (!HMAC_SHA256(sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x20, (in->dataSize - in->unfixedInfosHmacOffset) - 0x20, out->data + in->unfixedInfosHmacOffset, &hmacLen))
 					{
 						return CCR_NFC_ERROR;
 					}
@@ -289,7 +288,7 @@ namespace iosu
 				else
 				{
 					uint32 hmacLen = 0x20;
-					if (!HMAC(EVP_sha256(), sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x21, (in->dataSize - in->unfixedInfosHmacOffset) - 0x21, out->data + in->unfixedInfosHmacOffset, &hmacLen))
+					if (!HMAC_SHA256(sUnfixedInfosInternalHmacKey, sizeof(sUnfixedInfosInternalHmacKey), out->data + in->unfixedInfosHmacOffset + 0x21, (in->dataSize - in->unfixedInfosHmacOffset) - 0x21, out->data + in->unfixedInfosHmacOffset, &hmacLen))
 					{
 						return CCR_NFC_ERROR;
 					}

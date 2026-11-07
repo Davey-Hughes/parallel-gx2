@@ -14,9 +14,7 @@
 
 #include <pugixml.hpp>
 #include <curl/curl.h>
-#include <openssl/x509.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
+#include "util/crypto/sha.h"
 
 #include "Cemu/ncrypto/ncrypto.h"
 #include "Cemu/napi/napi_helper.h"
@@ -786,7 +784,7 @@ namespace iosu::boss
 			auto readbackFileData = FileStream::LoadIntoMemory(tmpDataPath);
 			uint8 hmacHash[32];
 			unsigned int hmacHashLen = 32;
-			HMAC(EVP_sha256(), "uyr5I8pu4ycq2pOT3D53Bp0n7jK8eyjLO5U20ocUNdN5muwUcC4By881UXECeM08", 64, readbackFileData->data(), originalFileSize - sizeof(BossNbdlHeader), hmacHash, &hmacHashLen);
+			HMAC_SHA256("uyr5I8pu4ycq2pOT3D53Bp0n7jK8eyjLO5U20ocUNdN5muwUcC4By881UXECeM08", 64, readbackFileData->data(), originalFileSize - sizeof(BossNbdlHeader), hmacHash, &hmacHashLen);
 			if (memcmp(hmacHash, fileHMAC, 32) != 0)
 			{
 				// failed to verify hash

@@ -13,10 +13,6 @@
 #include "pugixml.hpp"
 #include <charconv>
 
-#include"openssl/bn.h"
-#include"openssl/x509.h"
-#include"openssl/ssl.h"
-
 CURLcode _sslctx_function_NUS(CURL* curl, void* sslctx, void* param)
 {
 	if (iosuCrypto_addCACertificate(sslctx, 102) == false)
@@ -32,9 +28,6 @@ CURLcode _sslctx_function_NUS(CURL* curl, void* sslctx, void* param)
 	{
 		cemuLog_log(LogType::Force, "Certificate error");
 	}
-	SSL_CTX_set_mode((SSL_CTX*)sslctx, SSL_MODE_AUTO_RETRY);
-	SSL_CTX_set_verify_depth((SSL_CTX*)sslctx, 2);
-	SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_PEER, nullptr);
 	return CURLE_OK;
 }
 
@@ -44,9 +37,6 @@ CURLcode _sslctx_function_IDBE(CURL* curl, void* sslctx, void* param)
 	{
 		cemuLog_log(LogType::Force, "Invalid CA certificate (105)");
 	}
-	SSL_CTX_set_mode((SSL_CTX*)sslctx, SSL_MODE_AUTO_RETRY);
-	SSL_CTX_set_verify_depth((SSL_CTX*)sslctx, 2);
-
 	return CURLE_OK;
 }
 
@@ -61,9 +51,6 @@ CURLcode _sslctx_function_SOAP(CURL* curl, void* sslctx, void* param)
 	{
 		cemuLog_log(LogType::Force, "Certificate error");
 	}
-	SSL_CTX_set_mode((SSL_CTX*)sslctx, SSL_MODE_AUTO_RETRY);
-	SSL_CTX_set_verify_depth((SSL_CTX*)sslctx, 2);
-	SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_PEER, nullptr);
 	return CURLE_OK;
 }
 
@@ -92,9 +79,6 @@ CURLcode _sslctx_function_OLIVE(CURL* curl, void* sslctx, void* param)
 			iosuCrypto_addCACertificate(sslctx, certId);
 	}
 
-	SSL_CTX_set_mode((SSL_CTX*)sslctx, SSL_MODE_AUTO_RETRY);
-	SSL_CTX_set_verify_depth((SSL_CTX*)sslctx, 2);
-	SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_PEER, nullptr);
 	return CURLE_OK;
 }
 
@@ -115,12 +99,8 @@ CURLcode _sslctx_function_CUSTOM(CURL* curl, void* sslctx, void* param)
 			cemuLog_log(LogType::Force, "Invalid client certificate ({})", clientCertId);
 		}
 	}
-	SSL_CTX_set_mode((SSL_CTX*)sslctx, SSL_MODE_AUTO_RETRY);
-	SSL_CTX_set_verify_depth((SSL_CTX*)sslctx, 2);
 	if (requestHelper->GetClientCertIds().empty())
-		SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_NONE, nullptr);
-	else
-		SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_PEER, nullptr);
+		curl_tls_set_verify((curl_tls_settings*)sslctx, false, false);
 	return CURLE_OK;
 }
 

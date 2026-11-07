@@ -11,8 +11,7 @@
 #ifdef ENABLE_METAL
 #include "Cafe/HW/Latte/Renderer/Metal/LatteToMtl.h"
 #endif
-#include <openssl/sha.h> /* SHA1_DIGEST_LENGTH */
-#include <openssl/evp.h> /* EVP_Digest */
+#include "util/crypto/sha.h"
 
 void LatteSHRC_RemoveShaderStateCacheEntryByKey(uint64 key);
 
@@ -154,21 +153,19 @@ uint32 LatteParsedFetchShaderBufferGroup::getCurrentBufferStride(uint32* context
 void LatteFetchShader::CalculateFetchShaderVkHash()
 {
 	// calculate SHA1 of all states that are part of the Vulkan graphics pipeline
-	EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-	EVP_DigestInit(ctx, EVP_sha1());
+	ShaStream ctx(true);
 	for(auto& group : bufferGroups)
 	{
 		// offsets
 		for (sint32 t = 0; t < group.attribCount; t++)
 		{
 			uint32 offset = group.attrib[t].offset;
-			EVP_DigestUpdate(ctx, &t, sizeof(t));
-			EVP_DigestUpdate(ctx, &offset, sizeof(offset));
+			ctx.Update(&t, sizeof(t));
+			ctx.Update(&offset, sizeof(offset));
 		}
 	}
 	uint8 shaDigest[SHA_DIGEST_LENGTH];
-	EVP_DigestFinal_ex(ctx, shaDigest, NULL);
-	EVP_MD_CTX_free(ctx);
+	ctx.Final(shaDigest);
 
 	// fold SHA1 hash into a 64bit value
 	uint64 h = *(uint64*)(shaDigest + 0);

@@ -1,48 +1,48 @@
-# Cemu Libretro
+# ParaLLEl GX2
 
-Cemu (Wii U emulator) as a libretro core for RetroArch.
+Cemu (Wii U emulator) as a libretro core for RetroArch, `parallel_gx2_libretro`.
 
 Version: **2.6-372-g29f2f1fa**, upstream Cemu as merged (`29f2f1fa`, 15 Oct 2026).
 
 ## Getting the core
 
-Through RetroArch: **Online Updater → Core Downloader → Cemu**. The libretro buildbot builds the `libretro` branch nightly for Windows x64, Linux x64 and arm64, macOS x64 and arm64, and Android arm64-v8a and x86_64, so the downloadable core is always the current tree. The CI also builds iOS, tvOS and webOS. There are no releases here on purpose: one more place to download from is one more place to be out of date.
+Through RetroArch: **Online Updater → Core Downloader → Nintendo - Wii U (ParaLLEl GX2)**. The libretro buildbot builds the `libretro` branch nightly for Windows x64, Linux x64 and arm64, macOS x64 and arm64, and Android arm64-v8a and x86_64, so the downloadable core is always the current tree. The CI also builds iOS, tvOS and webOS. There are no releases here on purpose: one more place to download from is one more place to be out of date.
 
 Build it yourself for anything else, or to test a change.
 
 ## Build
 
+A static Makefile builds the core and everything it uses: the libraries are
+submodules built with it, and the network layer is libretro-common's (HTTP
+and TLS, with no libcurl, OpenSSL or mbedTLS), so nothing but a C++20
+compiler and, on Linux, the system's GL and X11 headers is needed.
+
 ```bash
-# Install dependencies (Ubuntu/Debian)
-sudo apt install -y cmake gcc g++ ninja-build nasm libpulse-dev \
-  libsecret-1-dev libgcrypt20-dev libsystemd-dev freeglut3-dev
+# Ubuntu/Debian: the headers the OpenGL and Vulkan surfaces are declared with
+sudo apt install -y g++ make libgl-dev libegl-dev libx11-dev libxrender-dev libx11-xcb-dev
 
-# Clone with submodules - vcpkg and the community graphic packs live in them,
-# and configure fails with "Could not find toolchain file
-# .../dependencies/vcpkg/..." without them. On an existing clone:
-# git submodule update --init --recursive
-git clone --recursive https://github.com/WizzardSK/cemu-libretro.git
-cd cemu-libretro
+# Clone with submodules - the libraries and the community graphic packs live
+# in them. On an existing clone: git submodule update --init --recursive
+git clone --recursive https://github.com/libretro/parallel-gx2.git
+cd parallel-gx2
 
-# Configure (vcpkg handles dependencies automatically)
-cmake -S . -B build -DCMAKE_BUILD_TYPE=release \
-  -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
-  -G Ninja
-
-# On arm64, vcpkg needs VCPKG_FORCE_SYSTEM_BINARIES=1, and
-# VCPKG_MAX_CONCURRENCY is worth capping on low-memory boards.
-
-# Build
-cmake --build build --target cemu_libretro
-
-# Result: bin/cemu_libretro.so
+make -j$(nproc)
+# Result: parallel_gx2_libretro.so
 ```
+
+The same Makefile builds the other targets: `make` under MSYS2 MinGW64 (or
+with `CC`/`CXX` set to a MinGW-w64 cross compiler) for Windows,
+`platform=osx` with `arch=arm64` or `arch=x86_64` for macOS,
+`platform=ios-arm64` and `platform=tvos-arm64` (Metal only),
+`platform=android-arm64` and `platform=android-x86_64` with `NDK_ROOT` set,
+and a webOS SDK compiler as `CC`/`CXX` for webOS. `DEBUG=1` builds without
+optimisation, `SANITIZER=address` with a sanitizer.
 
 ## Install
 
 ```bash
-cp bin/cemu_libretro.so ~/.config/retroarch/cores/
-cp cemu_libretro.info ~/.config/retroarch/info/
+cp parallel_gx2_libretro.so ~/.config/retroarch/cores/
+cp parallel_gx2_libretro.info ~/.config/retroarch/info/
 ```
 
 ## Setup
@@ -117,17 +117,23 @@ git fetch cemuup main
 git merge cemuup/main
 ```
 
-Last sync: upstream `29f2f1fa` (merged 23 Oct 2026). The core reports its version as `git describe --tags --match v2.6 cemuup/main` (`2.6-372-g29f2f1fa`), set in `retro_get_system_info` and `cemu_libretro.info`; update both, and the version at the top of this README, on every sync.
+Last sync: upstream `29f2f1fa` (merged 23 Oct 2026). The core reports its version as `git describe --tags --match v2.6 cemuup/main` (`2.6-372-g29f2f1fa`), set in `retro_get_system_info` and `parallel_gx2_libretro.info`; update both, and the version at the top of this README, on every sync.
 
 The fork has no `main` of its own: upstream is merged straight into `libretro`,
 the only long-lived branch here.
 
 What tends to break on a sync, none of which the conflict resolution shows:
 
-- **Precompiled headers.** Upstream force-includes `precompiled.h` per target
-  via `cemu_use_precompiled_header()`. Targets this fork adds (`cemu_libretro`,
-  `CemuHeadlessGui`) have to call it too, or they lose `uint32`, `std::span`
-  and the `_mm_pause` shim.
+- **Source lists.** The core builds from the Makefile, not upstream's CMake
+  (which `.upstream-excluded` removes on every merge): a source file upstream
+  adds or removes has to be added to or removed from `Makefile.common` by
+  hand. Every unit of the core is compiled with `precompiled.h` force-included,
+  as upstream's `cemu_use_precompiled_header()` does.
+- **Boost and the network libraries.** The core has no Boost: the parts the
+  emulator uses are small headers in `dependencies/boost-compat`, and
+  `dependencies/curl-compat` carries libcurl's API over libretro-common's
+  HTTP and TLS. Upstream code that reaches for another Boost header, or a
+  libcurl or OpenSSL call these do not have yet, fails to build until they do.
 - **Copied functions drifting.** The libretro `VulkanRenderer` constructor is a
   copy of upstream's adapted for the shared device; upstream keeps changing the
   original underneath it.
@@ -140,5 +146,5 @@ What tends to break on a sync, none of which the conflict resolution shows:
 
 Debugging a crash on aarch64: `backtrace()` cannot unwind past the signal frame,
 so the posix handler also records `fault/pc/lr/sp` into `<system>/Cemu/log.txt`.
-Convert `lr` with the module base from that log's `cemu_libretro.so(+0xOFFSET)
-[0xABSOLUTE]` line and run `addr2line -Cfie bin/cemu_libretro.so <offset>`.
+Convert `lr` with the module base from that log's `parallel_gx2_libretro.so(+0xOFFSET)
+[0xABSOLUTE]` line and run `addr2line -Cfie parallel_gx2_libretro.so <offset>`.

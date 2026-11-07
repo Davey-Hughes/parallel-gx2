@@ -544,7 +544,7 @@ void Account::ParseFile(class FileStream* file)
 	}
 }
 
-#include"openssl/sha.h"
+#include "util/crypto/sha.h"
 
 void makePWHash(uint8* input, sint32 length, uint32 magic, uint8* output)
 {

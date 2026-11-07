@@ -7,8 +7,7 @@
 
 #include "util/crypto/aes128.h"
 
-#include <openssl/crypto.h>
-#include "openssl/sha.h"
+#include "util/crypto/sha.h"
 
 namespace nsyshid
 {

@@ -1,6 +1,6 @@
 #pragma once
 #include "Cemu/ncrypto/ncrypto.h"
-#include "openssl/evp.h"
+#include "util/crypto/sha.h"
 
 struct FSTFileHandle
 {
@@ -98,7 +98,7 @@ private:
 
 	struct FSTCluster
 	{
-		FSTCluster() : singleHashCtx(nullptr, &EVP_MD_CTX_free) {}
+		FSTCluster() = default;
 
 		uint32 offset;
 		uint32 size;
@@ -109,7 +109,7 @@ private:
 		bool contentHashIsSHA1; // if true then it's SHA1 (with extra bytes zeroed out), otherwise it's SHA256
 		uint64 contentSize; // size of the content (in blocks)
 		// hash context for single hash mode (content hash must be available)
-		std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> singleHashCtx; // unique_ptr to make this move-only
+		std::unique_ptr<ShaStream> singleHashCtx; // unique_ptr to make this move-only
 		uint32 singleHashNumBlocksHashed{0};
 	};
 

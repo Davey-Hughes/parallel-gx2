@@ -1,7 +1,6 @@
 #pragma once
 #include "util/crypto/aes128.h"
-#include "openssl/evp.h"
-#include "openssl/hmac.h"
+#include "util/crypto/sha.h"
 
 typedef struct
 {
@@ -79,7 +78,7 @@ void amiiboCryptStep(amiiboCryptCtx_t* ctx, drgbOutput32_t* output)
 	ctx->counter++;
 	// generate bytes
 	uint32 mdLen = (uint32)sizeof(drgbOutput32_t);
-	HMAC(EVP_sha256(), ctx->hmacKey, sizeof(ctx->hmacKey), (const unsigned char *)ctx->buffer, ctx->bufferSize, output->raw, &mdLen);
+	HMAC_SHA256(ctx->hmacKey, sizeof(ctx->hmacKey), (const unsigned char *)ctx->buffer, ctx->bufferSize, output->raw, &mdLen);
 }
 
 typedef struct
@@ -204,11 +203,11 @@ void amiiboDecrypt()
 
 	// generate tag hmac
 	uint32 mdLen = 32;
-	HMAC(EVP_sha256(), derivedKeysTag.hmacKey, 16, (((uint8*)&nfp_data.amiiboInternal) + 0x1D4), 0x34,
+	HMAC_SHA256(derivedKeysTag.hmacKey, 16, (((uint8*)&nfp_data.amiiboInternal) + 0x1D4), 0x34,
 		nfp_data.amiiboInternal.tagHMAC, &mdLen);
 	// generate data hmac
 	mdLen = 32;
-	HMAC(EVP_sha256(), derivedKeysData.hmacKey, 16, (((uint8*)&nfp_data.amiiboInternal) + 0x29), 0x1DF,
+	HMAC_SHA256(derivedKeysData.hmacKey, 16, (((uint8*)&nfp_data.amiiboInternal) + 0x29), 0x1DF,
 		((uint8*)&nfp_data.amiiboInternal) + 0x8, &mdLen);
 
 	bool isValidTagHMAC = memcmp(nfp_data.amiiboNFCData.tagHMAC, nfp_data.amiiboInternal.tagHMAC, 32) == 0;
@@ -240,11 +239,11 @@ void amiiboEncrypt(AmiiboRawNFCData* nfcOutput)
 	// generate new HMACs
 	uint8 tagHMAC[32];
 	uint32 mdLen = 32;
-	HMAC(EVP_sha256(), derivedKeysTag.hmacKey, 16, (((uint8*)&internalCopy) + 0x1D4), 0x34,
+	HMAC_SHA256(derivedKeysTag.hmacKey, 16, (((uint8*)&internalCopy) + 0x1D4), 0x34,
 		tagHMAC, &mdLen);
 	mdLen = 32;
 	uint8 dataHMAC[32];
-	HMAC(EVP_sha256(), derivedKeysData.hmacKey, 16, (((uint8*)&internalCopy) + 0x29), 0x1DF,
+	HMAC_SHA256(derivedKeysData.hmacKey, 16, (((uint8*)&internalCopy) + 0x29), 0x1DF,
 		dataHMAC, &mdLen);
 
 	memset(internalCopy.tagHMAC, 0, 32);

@@ -3,10 +3,6 @@
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "nlibcurl.h"
 
-#include "openssl/bn.h"
-#include "openssl/x509.h"
-#include "openssl/ssl.h"
-
 #define CURL_STRICTER
 
 #include "curl/curl.h"
@@ -386,13 +382,6 @@ uint32 SendOrderToWorker(CURL_t* curl, QueueOrder order, uint32 arg1 = 0)
 	return result;
 }
 
-static int curl_closesocket(void *clientp, curl_socket_t item)
-{
-	nsysnet_notifyCloseSharedSocket((SOCKET)item);
-	closesocket(item);
-	return 0;
-}
-
 void _curl_set_default_parameters(CURL_t* curl)
 {
 	curl->set.SetToDefault();
@@ -400,9 +389,6 @@ void _curl_set_default_parameters(CURL_t* curl)
 	// default parameters
 	curl_easy_setopt(curl->curl, CURLOPT_HEADERFUNCTION, header_callback);
 	curl_easy_setopt(curl->curl, CURLOPT_HEADERDATA, curl);
-
-	curl_easy_setopt(curl->curl, CURLOPT_CLOSESOCKETFUNCTION, curl_closesocket);
-	curl_easy_setopt(curl->curl, CURLOPT_CLOSESOCKETDATA, nullptr);
 }
 
 void _curl_sync_parameters(CURL_t* curl)
@@ -926,16 +912,6 @@ void export_curl_easy_reset(PPCInterpreter_t* hCPU)
 	osLib_returnFromFunction(hCPU, 0);
 }
 
-int ssl_verify_callback(int preverify_ok, X509_STORE_CTX* ctx)
-{
-	if (preverify_ok) return preverify_ok;
-	int err = X509_STORE_CTX_get_error(ctx);
-	if(err != 0)
-		cemuLog_logDebug(LogType::Force, "ssl_verify_callback: Error {} but allow certificate anyway", err);
-	X509_STORE_CTX_set_error(ctx, 0);
-	return 1;
-}
-
 CURLcode ssl_ctx_callback(CURL* curl, void* sslctx, void* param)
 {
 	//peterBreak();
@@ -968,15 +944,11 @@ CURLcode ssl_ctx_callback(CURL* curl, void* sslctx, void* param)
 	uint32 flags = ppcCurl->nsslVerifyOptions;
 	if (HAS_FLAG(flags, NSSL_VERIFY_PEER))
 	{
-		::SSL_CTX_set_cipher_list((SSL_CTX*)sslctx, "AES256-SHA"); // TLS_RSA_WITH_AES_256_CBC_SHA (in CURL it's called rsa_aes_256_sha)
-		::SSL_CTX_set_mode((SSL_CTX*)sslctx, SSL_MODE_AUTO_RETRY);
-		::SSL_CTX_set_verify_depth((SSL_CTX*)sslctx, 2);
-		::SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_PEER, ssl_verify_callback);
+		static const unsigned rsaAes256Sha = 0x0035; // TLS_RSA_WITH_AES_256_CBC_SHA (in CURL it's called rsa_aes_256_sha)
+		curl_tls_set_suites((curl_tls_settings*)sslctx, &rsaAes256Sha, 1);
 	}
-	else
-	{
-		::SSL_CTX_set_verify((SSL_CTX*)sslctx, SSL_VERIFY_NONE, nullptr);
-	}
+	// the peer is not checked: the console accepts certificates OpenSSL would refuse
+	curl_tls_set_verify((curl_tls_settings*)sslctx, false, false);
 	
 	return CURLE_OK;
 }

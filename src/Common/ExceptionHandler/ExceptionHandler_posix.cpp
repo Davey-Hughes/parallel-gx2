@@ -22,6 +22,7 @@
 #include <string>
 #include "config/CemuConfig.h"
 #include "util/helpers/StringHelpers.h"
+#include <boost/core/demangle.hpp>
 #include "Cafe/HW/Espresso/PPCState.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"

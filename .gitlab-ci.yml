@@ -7,589 +7,167 @@
 # Core definitions
 .core-defs:
   variables:
-    CORENAME: cemu
-    # CMake writes cemu_libretro.so to <source>/bin (see src/CMakeLists.txt),
-    # which is outside of BUILD_DIR, so climb back out of build/linux-$ARCH.
-    EXTRA_PATH: ../../bin
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-    # Cemu is C++20; the image default compiler is too old for it.
-    CC: gcc-12
-    CXX: g++-12
-    # arm64-linux is a community triplet - vcpkg ships no prebuilt tools for it
-    # and has to use the ones from the image.
-    VCPKG_FORCE_SYSTEM_BINARIES: 1
-    # vcpkg builds every port from source; its binary cache keeps what it built,
-    # and GitLab's cache keeps that between pipelines, so a commit that leaves
-    # the dependencies alone does not build them again. vcpkg looks each port
-    # up by the hash of everything it is built from, so a cache from before a
-    # change of ports or of vcpkg is simply not used for what changed. The
-    # directory is in the repository (it has to exist before vcpkg runs).
-    VCPKG_DEFAULT_BINARY_CACHE: $CI_PROJECT_DIR/vcpkg-cache
-  cache:
-    key: vcpkg-$CI_JOB_NAME
-    paths:
-      - vcpkg-cache/
-    # Kept from a failed job too: what it did build is still good
-    when: always
-
-variables:
-  GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_STRATEGY: recursive
+    CORENAME: parallel_gx2
 
 # Inclusion templates, required for the build to work
 include:
   ################################## DESKTOPS ################################
-  # Linux
-  - project: 'libretro-infrastructure/ci-templates'
-    file: '/linux-cmake.yml'
   # Windows
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/windows-cmake-mingw.yml'
-  # macOS
+    file: '/windows-x64-mingw.yml'
+
+  # Linux 64-bit
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/osx-cmake-x86.yml'
+    file: '/linux-x64.yml'
+
+  # Linux ARM 64-bit
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/osx-cmake-arm64.yml'
-  # Apple embedded (iOS and tvOS, both arm64)
+    file: '/linux-aarch64.yml'
+
+  # MacOS x64
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/ios-cmake.yml'
+    file: '/osx-x64.yml'
+
+  # MacOS arm64
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/tvos-cmake.yml'
+    file: '/osx-arm64.yml'
+
   ################################## CELLULAR ################################
   # Android
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/android-cmake.yml'
-  ################################### TELEVISION #############################
-  # webOS. aarch64 only - see the job at the end for why.
+    file: '/android-make.yml'
+
+  # iOS arm64
   - project: 'libretro-infrastructure/ci-templates'
-    file: '/webos-cmake.yml'
+    file: '/ios-arm64.yml'
+
+  # tvOS arm64
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/tvos-arm64.yml'
+
+  ################################## MISC ####################################
+  # webOS aarch64
+  - project: 'libretro-infrastructure/ci-templates'
+    file: '/webos-make.yml'
 
 # Stages for building
 stages:
   - build-prepare
   - build-shared
-
-# libretro-runner-02 has been dropping jobs within seconds and then running the
-# same job green on the next pipeline with nothing changed — windows-x64 after
-# three 17-minute successes, both android ABIs, linux-x64. Retry rather than let
-# a runner having a bad minute redden the pipeline; anything really broken still
-# fails three times over.
-default:
-  retry: 2
+  - test
 
 ##############################################################################
 #################################### STAGES ##################################
 ##############################################################################
 #
 ################################### DESKTOPS #################################
-# Both Linux jobs want the same packages and the same extra time, and a job
-# defining before_script replaces the template's instead of adding to it - so
-# the repeated part lives here.
+# Linux wants the GLX, EGL, X11 and XCB headers the core's OpenGL and
+# Vulkan surfaces are declared with; a job defining before_script replaces
+# the template's, so its one line is repeated here.
 .core-defs-linux:
   extends: .core-defs
-  # vcpkg builds every dependency from source (~30 ports, Boost among them),
-  # which does not fit in the default one hour.
-  timeout: 3h
   variables:
-    # Wayland is dead weight in a core build and the x86_64 image cannot even
-    # satisfy it: find_package(WaylandProtocols 1.15) fails there against the
-    # image's 1.13. HAS_WAYLAND only reaches wxgui - which ENABLE_LIBRETRO
-    # forces off - and VulkanRenderer's surface creation, which returns before
-    # any of it in libretro mode, where the frontend hands the core a surface.
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-      -DENABLE_WAYLAND=OFF
+    # Cemu is C++20
+    CC: gcc-12
+    CXX: g++-12
   before_script:
-    # Repeated from .libretro-linux-cmake, whose before_script this replaces.
     - export NUMPROC=$(($(nproc)/5))
-    - if builtin type -P ccache &> /dev/null; then ccache -V &> /dev/null; fi
-    # libdbus-1-dev is not optional here: dependencies/vcpkg_overlay_ports_linux/dbus
-    # is an empty package on purpose (see the portfile), so sdl2[dbus] has only
-    # the system headers to build against. The rest is what the other vcpkg
-    # ports (SDL2, libusb) and the core itself (GL/EGL/X11) need.
     - apt-get update -qq
     - apt-get install -y --no-install-recommends
-      nasm autoconf automake libtool pkg-config python3
-      libglm-dev libgl1-mesa-dev libegl1-mesa-dev
-      libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev
-      libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols
-      libudev-dev libdbus-1-dev libgcrypt20-dev
+      libgl-dev libegl-dev libx11-dev libxrender-dev libx11-xcb-dev
 
-# Linux aarch64
-libretro-build-linux-aarch64:
-  extends:
-    - .libretro-linux-cmake-aarch64
-    - .core-defs-linux
-
-# Linux x86_64
-libretro-build-linux-x64:
-  extends:
-    - .libretro-linux-cmake-x86_64
-    - .core-defs-linux
-  # The template's x86_64 image is Ubuntu Xenial with GCC 9, which cannot build
-  # C++20 at all; backports is the same family of image with newer compilers,
-  # gcc-12 among them (the same one the aarch64 image is held to).
-  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
-  before_script:
-    - !reference [.core-defs-linux, before_script]
-    # x64-linux is a first-class triplet, so let vcpkg fetch its own cmake and
-    # ninja rather than holding it to whatever the image ships. That variable
-    # belongs to the aarch64 job, where the community triplet has no prebuilt
-    # tools to fetch; here it only gets in the way.
-    - unset VCPKG_FORCE_SYSTEM_BINARIES
-
-# Windows x86_64
-# Windows has only ever been built with MSVC so far (the GitHub Actions workflow
-# does that on windows-2022, and the CMakeLists' Windows bits - SEH exception
-# handler, /WHOLEARCHIVE, the MSVC runtime property - are written for it). This
-# cross build with MXE's MinGW is new ground, on top of a vcpkg dependency set
-# that has never been brought up for the mingw triplet, so keep it from failing
-# the pipeline while it is worked out.
+# Windows 64-bit
 libretro-build-windows-x64:
   extends:
-    - .libretro-windows-cmake-x86_64
+    - .libretro-windows-x64-mingw-make-default
     - .core-defs
-  allow_failure: true
-  # Same reason as the Linux jobs: everything is built from source.
-  timeout: 3h
-  before_script:
-    # Repeated from .libretro-windows-cmake, whose before_script this replaces.
-    - export NUMPROC=$(($(nproc)/5))
-    - if builtin type -P ccache &> /dev/null; then ccache -V &> /dev/null; fi
-    # The host here is x86_64 Linux, the same as in the Linux x64 job above.
-    - unset VCPKG_FORCE_SYSTEM_BINARIES
-    # .core-defs asks for gcc-12, a package name from the Ubuntu images. The
-    # compilers here come from MXE's cmake wrapper
-    # (x86_64-w64-mingw32.static-cmake), which the top-level CMakeLists hands to
-    # vcpkg as a chainload toolchain; leaving CC/CXX set would only mislead the
-    # ports that build with their own configure scripts.
-    - unset CC CXX
-    # What the ports configure with; the MXE image carries the cross toolchain
-    # and not much else.
-    - apt-get update -qq
-    - apt-get install -y --no-install-recommends
-      nasm autoconf automake libtool pkg-config python3
-    # vcpkg builds the ports with its own scripts/toolchains/mingw.cmake (the
-    # chainload set in CMakeLists only covers the core's own build), and that
-    # file looks the compiler up as x86_64-w64-mingw32-gcc. MXE spells its
-    # tools x86_64-w64-mingw32.static-gcc, so the find_program() comes up empty
-    # and CMake falls back to the host cc/c++ - which is then handed MinGW link
-    # flags and dies on "ld: unrecognized option '--major-image-version'"
-    # before the first port is built. Give every MXE tool the name vcpkg looks
-    # for.
-    - |
-      for tool in /usr/lib/mxe/usr/bin/x86_64-w64-mingw32.static-*; do
-        [ -e "$tool" ] || continue
-        name=$(basename "$tool")
-        ln -sf "$tool" "/usr/local/bin/${name/.static-/-}"
-      done
-  variables:
-    # CMakeLists picks x64-windows-static as soon as WIN32 is set, which is an
-    # MSVC triplet; MinGW needs its own. A -D from the command line wins over
-    # the set(... CACHE) there, and the triplet is also what tells that code
-    # which port overlay to use, as WIN32 is not set yet on a Unix host.
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_WXWIDGETS=OFF
-      -DENABLE_DISCORD_RPC=OFF
-      -DENABLE_CUBEB=OFF
-      -DVCPKG_TARGET_TRIPLET=x64-mingw-static
-      -DVCPKG_HOST_TRIPLET=x64-linux
 
-################################### CELLULAR #################################
-# Android is a fresh target for this core: unlike the Linux job it has to build
-# the whole vcpkg dependency set for a cross triplet, and none of it has run
-# before - so keep these from failing the pipeline while they are brought up.
-.core-defs-android:
-  extends: .core-defs
-  allow_failure: true
-  # Same reason as the Linux job, plus a cross toolchain on top.
-  timeout: 3h
-  before_script:
-    # Repeated from the template, whose before_script this one replaces.
-    - export NUMPROC=$(($(nproc)/5))
-    # vcpkg needs a host compiler for the x64-linux ports it builds first, the
-    # autotools most of its ports configure with, and make - the generator the
-    # template's cmake line falls back to; the Android image has them all
-    # (Ubuntu 26.04, October 2026: gcc, g++, make, ninja, autoconf, automake,
-    # libtool, pkg-config, python3, unzip, curl, git, nasm, zip), so nothing is
-    # installed here.
-    # .core-defs asks for gcc-12, which the Linux image has and this one does
-    # not. Leaving CC/CXX set to anything at all is worse than dropping them:
-    # the cmake ports ignore them and take the NDK's clang, but openssl builds
-    # with its own Configure and a makefile, which honours $CC and so feeds the
-    # clang flags to the host gcc ("unrecognized command-line option
-    # '--target=aarch64-none-linux-android28'"). Unset, openssl picks up the
-    # NDK clang the port puts on PATH and the host triplet - which only builds
-    # vcpkg's own helper tools - finds the image's cc, the same as on GitHub
-    # Actions, where neither variable is set to begin with.
-    - unset CC CXX
-    # The host here is x86_64, so vcpkg can fetch its own cmake and ninja
-    # instead of being held to the image's. That flag belongs to the aarch64
-    # Linux job, where the community triplet has no prebuilt tools to fetch.
-    - unset VCPKG_FORCE_SYSTEM_BINARIES
-    # The ports are built with vcpkg's own scripts/toolchains/android.cmake -
-    # the chainload set in CMakeLists only covers the core's own build - and
-    # that file looks the NDK up in ANDROID_NDK_HOME, falling back to Windows
-    # paths that do not exist here. The image calls it NDK_ROOT instead, so
-    # "Detecting compiler hash for triplet arm64-android" dies right there.
-    # (GitHub Actions runners set ANDROID_NDK_HOME, hence the green build.)
-    - export ANDROID_NDK_HOME="$NDK_ROOT"
-    - export ANDROID_NDK_ROOT="$NDK_ROOT"
-  variables:
-    # The template defaults to API 16, which is nowhere near enough for C++20.
-    # 28 is the floor that works: bionic only got iconv (SDL2 links it) and
-    # aligned_alloc there.
-    API_LEVEL: 28
-    # Cemu's CMakeLists hands the template's NDK toolchain to vcpkg as a
-    # chainload toolchain (see the comment there); this picks the triplet the
-    # ports are built for.
-    VCPKG_DEFAULT_TRIPLET: $VCPKG_TRIPLET
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-      -DENABLE_WAYLAND=OFF
-      -DENABLE_DISCORD_RPC=OFF
-      -DVCPKG_TARGET_TRIPLET=$VCPKG_TRIPLET
-      -DVCPKG_HOST_TRIPLET=x64-linux
-
-# Android aarch64
-# macOS. Cemu ships macOS builds of its own and the core now builds for both
-# slices on GitHub Actions runners, so the only unknown left is this buildbot's
-# Macs: the ones pcee2 runs on have cmake, ninja, git and clang but no Homebrew,
-# and several vcpkg ports want nasm or the autotools. Rather than guess, the
-# setup writes down what it finds and the job keeps that as an artifact —
-# traces here need an account to read, artifacts do not.
-.core-defs-macos:
-  extends: .core-defs
-  allow_failure: true
-  # vcpkg builds every dependency from source, as on the other platforms.
-  timeout: 3h
-  before_script:
-    # Replaces the osx template's before_script, which uses nproc — a coreutils
-    # binary that a stock macOS runner does not have.
-    - export NUMPROC=$(($(sysctl -n hw.ncpu)/5))
-    # .core-defs sets this for the arm64-linux community triplet, where vcpkg has
-    # no prebuilt tools to fetch. On macOS it is the opposite: holding vcpkg to
-    # the runner's binaries is what broke detect_compiler ("vcpkg was unable to
-    # detect the active compiler's information"), so let it bring its own.
-    - unset VCPKG_FORCE_SYSTEM_BINARIES
-    # .core-defs asks for gcc-12, which is a package name from the Ubuntu images;
-    # macOS has clang and nothing by that name, so vcpkg's detect_compiler port
-    # failed on "Could not find the compiler specified in the environment
-    # variable CC: gcc-12" before a single dependency was built. The Windows job
-    # unsets these for the same reason.
-    - unset CC CXX
-    # The runner's ninja is on an x86_64 Homebrew path on an arm64 machine and
-    # CMake could not use it; ask for Ninja only if it actually runs here.
-    - |
-      if ninja --version >/dev/null 2>&1; then GEN="-G Ninja"; else GEN=""; fi
-      export GEN
-    - |
-      {
-        echo "== $CI_JOB_NAME on $(uname -m)"; sw_vers || true; xcode-select -p || true
-        for t in git cmake ninja nasm brew automake autoconf libtool pkg-config python3 clang mono; do
-          printf '%-12s ' "$t"; command -v "$t" || echo MISSING
-        done
-        echo "generator: ${GEN:-default}"; ninja --version 2>&1 | head -1
-      } > ci-macos-debug.log 2>&1
-    - |
-      {
-        if command -v brew >/dev/null 2>&1; then
-          for pkg in nasm automake libtool; do brew list $pkg >/dev/null 2>&1 || brew install $pkg || echo "brew install $pkg FAILED"; done
-        else
-          echo "no brew on this runner - ports needing nasm or the autotools will say so below"
-        fi
-      } >> ci-macos-debug.log 2>&1
-    # The Vulkan renderer links the loader; on macOS that is MoltenVK, the same
-    # release the standalone macOS build uses.
-    - |
-      {
-        curl -L -o MoltenVK-macos-privateapi.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-macos-privateapi.tar &&
-        tar xf MoltenVK-macos-privateapi.tar &&
-        mkdir -p "$CI_PROJECT_DIR/deps/lib" &&
-        cp MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib /usr/local/lib 2>/dev/null ||
-        cp MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib "$CI_PROJECT_DIR/deps/lib"
-      } >> ci-macos-debug.log 2>&1
-    - bash ./dependencies/vcpkg/bootstrap-vcpkg.sh 2>&1 | tail -20 | tee -a ci-macos-debug.log
-  # The template's script, with its output appended to the same artifact. The
-  # first run died here, a minute in, and the trace needs an account to read.
-  script:
-    - |
-      set -o pipefail
-      {
-        ${CMAKE} $GEN -DCMAKE_BUILD_TYPE=Release $CORE_ARGS "$CMAKE_SOURCE_ROOT" -B$BUILD_DIR $CMAKE_OSX_EXTRA &&
-        ${CMAKE} --build $BUILD_DIR --target ${CORENAME}_libretro --config Release -- -j $NUMPROC
-      } 2>&1 | tail -300 | tee -a ci-macos-debug.log
-    - mv $BUILD_DIR/$EXTRA_PATH/$LIBNAME $LIBNAME
-  # vcpkg reports failures by pointing at logs the trace does not show, and the
-  # script stops at the first failing command — so collecting them belongs here,
-  # where it runs whatever happened.
-  after_script:
-    - |
-      for f in "$BUILD_DIR/vcpkg-manifest-install.log" \
-               dependencies/vcpkg/buildtrees/detect_compiler/*-err.log \
-               dependencies/vcpkg/buildtrees/detect_compiler/*-out.log; do
-        [ -f "$f" ] || continue
-        echo "===== $f (tail)" >> ci-macos-debug.log
-        tail -60 "$f" >> ci-macos-debug.log
-      done
-      for f in $(ls -t dependencies/vcpkg/buildtrees/*/*-err.log 2>/dev/null | head -2); do
-        echo "===== $f (tail)" >> ci-macos-debug.log
-        tail -60 "$f" >> ci-macos-debug.log
-      done
-  artifacts:
-    when: always
-    expire_in: 1 week
-    paths:
-      - ci-macos-debug.log
-      - $LIBNAME
-
-# iOS and tvOS. Same core, and the platform decides three things for it: no
-# OpenGL (the emulator's GL backend has nothing to run on where GL is EAGL and
-# GLES), no Vulkan (MoltenVK is a dylib and these systems do not load a loose
-# one), so the GS is Metal - with the readback present path the core already has
-# for frontends that hand out no hardware context.
-#
-# JIT is the honest caveat: mapping executable pages needs an entitlement a
-# stock install does not grant, which is the same bargain every JIT core on
-# these platforms makes, and not something this build can fix.
-#
-# allow_failure while they settle, like the macOS jobs: nothing here has been
-# run on a device yet, only built.
-.core-defs-apple-embedded:
-  extends: .core-defs
-  allow_failure: true
-  # vcpkg builds every dependency from source, as on the other platforms.
-  timeout: 3h
-  variables:
-    # 13.4 is what CMakeLists asks for on Apple; the templates default to 8.0
-    # (iOS) and 12.0 (tvOS), which is older than the C++20 library the emulator
-    # needs. ios-cmake.yml reads IOS_MINVER, tvos-cmake.yml reads MINVER.
-    IOS_MINVER: "13.4"
-    MINVER: "13.4"
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-      -DENABLE_OPENGL=OFF
-      -DENABLE_VULKAN=OFF
-      -DENABLE_METAL=ON
-      -DENABLE_DISCORD_RPC=OFF
-      -DENABLE_WXWIDGETS=OFF
-      -DCMAKE_MACOSX_BUNDLE=OFF
-  before_script:
-    # Replaces the template's before_script, which is where NUMPROC is normally
-    # set for its `-j $NUMPROC` build line. sysctl, not nproc: a stock macOS
-    # runner has no coreutils.
-    - export NUMPROC=$(($(sysctl -n hw.ncpu)/5))
-    # Same two as the macOS jobs: vcpkg must bring its own binaries, and the
-    # gcc-12 the Linux jobs ask for does not exist here.
-    - unset VCPKG_FORCE_SYSTEM_BINARIES
-    - unset CC CXX
-    - |
-      if command -v brew >/dev/null 2>&1; then
-        for pkg in nasm automake libtool; do brew list $pkg >/dev/null 2>&1 || brew install $pkg || echo "brew install $pkg FAILED"; done
-      fi
-    - bash ./dependencies/vcpkg/bootstrap-vcpkg.sh 2>&1 | tail -20
-  after_script:
-    # vcpkg reports failures by pointing at logs the trace does not show.
-    - |
-      for f in "$BUILD_DIR/vcpkg-manifest-install.log" \
-               $(ls -t dependencies/vcpkg/buildtrees/*/*-err.log 2>/dev/null | head -2); do
-        [ -f "$f" ] || continue
-        echo "===== $f (tail)"
-        tail -60 "$f"
-      done
-
-libretro-build-osx-x64:
+# Linux 64-bit
+libretro-build-linux-x64:
   extends:
-    # -x86_64, not -x86: the latter is the 32-bit profile and sets ARCH=x86.
-    - .libretro-osx-cmake-x86_64
-    - .core-defs-macos
-  # The Intel runner behind the template's macosx-packaging tag only carries the
-  # macOS 10.15 SDK, and SDL3 needs the 11 one: UniformTypeIdentifiers.h is not
-  # there and GameController has no physicalInputProfile, so vcpkg cannot build
-  # sdl3 on it at any deployment target. Cross-compile the x86_64 slice on the
-  # Apple Silicon runner instead - CMakeLists.txt takes CEMU_ARCHITECTURE from
-  # CMAKE_OSX_ARCHITECTURES, and the GitHub macOS job builds this slice the same
-  # way on an arm64 runner.
+    - .libretro-linux-x64-make-default
+    - .core-defs-linux
+  # Ubuntu Xenial's GCC cannot build C++20; backports is the same family
+  # of image with newer compilers, gcc-12 among them.
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+
+# Linux ARM 64-bit
+libretro-build-linux-aarch64:
+  extends:
+    - .libretro-linux-aarch64-make-default
+    - .core-defs-linux
+
+# macOS Intel
+libretro-build-osx-x64:
   tags:
     - mac-apple-silicon
+  extends:
+    - .libretro-osx-x64-make-default
+    - .core-defs
   variables:
-    # The template targets 10.9, where std::filesystem does not exist yet, so
-    # glslang stopped on "'path' is unavailable: introduced in macOS 10.15".
-    # Same floor the arm64 template asks for.
-    MACOSX_DEPLOYMENT_TARGET: "10.15"
-    CMAKE_OSX_EXTRA: -DCMAKE_OSX_ARCHITECTURES=x86_64
+    arch: x86_64
 
+# macOS arm64
 libretro-build-osx-arm64:
   extends:
-    - .libretro-osx-cmake-arm64
-    - .core-defs-macos
+    - .libretro-osx-arm64-make-default
+    - .core-defs
 
+################################### CELLULAR #################################
+# Android ARMv8a
 android-arm64-v8a:
   extends:
-    - .libretro-android-cmake-arm64-v8a
-    - .core-defs-android
-  variables:
-    VCPKG_TRIPLET: arm64-android
+    - .libretro-android-make-arm64-v8a
+    - .core-defs
 
-# Android x86_64
+# Android x86_64 (for play only)
 android-x86_64:
   extends:
-    - .libretro-android-cmake-x86_64
-    - .core-defs-android
-  variables:
-    VCPKG_TRIPLET: x64-android
-
-##################################### APPLE ##################################
-# iOS (arm64).
-################################## TELEVISION ################################
-# webOS, aarch64 only. The other half of the platform is armv7a, and the
-# recompiler backends here are x86-64 and arm64 (BackendX64 and xbyak_aarch64) -
-# there is nothing for a 32-bit ARM device to run Espresso code on, so that half
-# is not offered rather than offered and broken.
-#
-# The renderer is Vulkan. Cemu's GL backend is desktop GL 4.5 with direct state
-# access and the buildroot carries EGL and GLES and nothing else, so it is off
-# here the same way it is on Android. The loader is dlopen()ed at run time
-# (VulkanAPI.cpp) and the headers are vendored, so the build needs nothing from
-# the SDK for it - but that also means the core lands on the device's own
-# libvulkan, and a TV without one will load the core and fail at renderer
-# creation. That is the device's property, not the build's.
-#
-# The dependency set is the interesting part: vcpkg builds its ports with the
-# toolchain named by their triplet, not with the one CMakeLists chainloads, so
-# this needs a triplet of its own (dependencies/vcpkg_triplets/arm64-webos.cmake)
-# that points at the SDK's toolchain file.
-#
-# allow_failure while it is new: the SDK exists only on the buildbot, so the
-# first pipeline is the first time this toolchain has seen the tree.
-libretro-build-webos-aarch64:
-  allow_failure: true
-  extends:
-    - .libretro-webos-aarch64-cmake
+    - .libretro-android-make-x86_64
     - .core-defs
-  # vcpkg builds every dependency from source, as on the other platforms.
-  timeout: 3h
-  variables:
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DWEBOS=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-      -DENABLE_WAYLAND=OFF
-      -DENABLE_OPENGL=OFF
-      -DENABLE_VULKAN=ON
-      -DENABLE_DISCORD_RPC=OFF
-      -DENABLE_WXWIDGETS=OFF
-      -DENABLE_CUBEB=OFF
-      -DENABLE_LIBUSB=OFF
-      -DVCPKG_TARGET_TRIPLET=arm64-webos
-      -DVCPKG_HOST_TRIPLET=x64-linux
-  before_script:
-    # Repeated from the template, whose before_script this one replaces.
-    - export NUMPROC=$(($(nproc)/5))
-    - export BUILD_DIR=build/webos-${WEBOS_ARCH}
-    - . "$SDK_ENV"
-    # The triplet reads the toolchain from the environment - see its comment.
-    - export WEBOS_CMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN_FILE"
-    # And the SDK's pkg-config, which the ports cannot find under its toolchain
-    # file (curl failed with "pkg-config tool not found").
-    - export WEBOS_PKG_CONFIG="$(command -v pkg-config)"
-    # environment-setup points every one of these at the cross toolchain, which
-    # is right for the core and wrong for everything vcpkg builds for the host
-    # triplet first (its own tools, and the ports x64-linux carries). The core's
-    # compiler comes from the toolchain file, not from here.
-    - unset CC CXX CPP CFLAGS CXXFLAGS CPPFLAGS LDFLAGS AR AS LD NM RANLIB OBJCOPY OBJDUMP
-    # It also exports the kernel build's ARCH, CROSS_COMPILE and KERNELDIR, and
-    # OpenSSL's Configure puts CROSS_COMPILE in front of the compiler the triplet
-    # gives it - an absolute path - so every object in the openssl port failed
-    # with "aarch64-webos-linux-gnu-/developer/.../aarch64-webos-linux-gnu-gcc:
-    # not found". Nothing here builds a kernel.
-    - unset ARCH CROSS_COMPILE KERNELDIR
-    # The host is x86_64, so vcpkg can fetch its own cmake and ninja rather than
-    # being held to the image's. That flag belongs to the aarch64 Linux job.
-    - unset VCPKG_FORCE_SYSTEM_BINARIES
-    # This image is built around the webOS SDK and has never run vcpkg, so write
-    # down what it does and does not carry, and install what is missing if that
-    # is allowed. Not every libretro image runs as root. The notes go to the
-    # trace (after_script), not to an artifact: the buildbot packages every
-    # artifact of this job as a core.
-    - |
-      {
-        head -2 /etc/os-release; id
-        for t in git curl zip unzip tar pkg-config python3 ninja cmake make gcc g++ autoconf automake libtool nasm; do
-          printf '%-12s ' "$t"; command -v "$t" || echo MISSING
-        done
-      } > ci-webos-debug.log 2>&1
-    - |
-      if [ "$(id -u)" = 0 ]; then
-        {
-          apt-get update -qq &&
-          apt-get install -y --no-install-recommends \
-            build-essential make ninja-build nasm autoconf automake libtool \
-            pkg-config python3 zip unzip curl git ca-certificates
-        } >> ci-webos-debug.log 2>&1 || echo "apt-get failed with $?" >> ci-webos-debug.log
-      else
-        echo "not root - taking the image as it is" >> ci-webos-debug.log
-      fi
-    - bash ./dependencies/vcpkg/bootstrap-vcpkg.sh 2>&1 | tail -20 | tee -a ci-webos-debug.log
-  # vcpkg reports failures by pointing at logs the trace does not show.
-  after_script:
-    - |
-      for f in "build/webos-aarch64/vcpkg-manifest-install.log" \
-               $(ls -t dependencies/vcpkg/buildtrees/*/*-err.log 2>/dev/null | head -3); do
-        [ -f "$f" ] || continue
-        echo "===== $f (tail)" >> ci-webos-debug.log
-        tail -60 "$f" >> ci-webos-debug.log
-      done
-      cat ci-webos-debug.log 2>/dev/null || true
-  artifacts:
-    expire_in: 1 week
-    paths:
-      - $LIBNAME
 
-################################## APPLE EMBEDDED ############################
+# iOS arm64: Metal only, the Vulkan renderer needs MoltenVK and a
+# frontend surface the core does not get here
 libretro-build-ios-arm64:
   extends:
-    - .libretro-ios-cmake-arm64
-    - .core-defs-apple-embedded
+    - .libretro-ios-arm64-make-default
+    - .core-defs
   variables:
-    VCPKG_DEFAULT_TRIPLET: arm64-ios
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-      -DENABLE_OPENGL=OFF
-      -DENABLE_VULKAN=OFF
-      -DENABLE_METAL=ON
-      -DENABLE_DISCORD_RPC=OFF
-      -DENABLE_WXWIDGETS=OFF
-      -DCMAKE_MACOSX_BUNDLE=OFF
-      -DVCPKG_TARGET_TRIPLET=arm64-ios
+    IOS_MINVER: "13.4"
 
-# tvOS (arm64).
+# tvOS arm64
 libretro-build-tvos-arm64:
   extends:
-    - .libretro-tvos-cmake-arm64
-    - .core-defs-apple-embedded
+    - .libretro-tvos-arm64-make-default
+    - .core-defs
   variables:
-    VCPKG_DEFAULT_TRIPLET: arm64-tvos
-    CORE_ARGS: >-
-      -DENABLE_LIBRETRO=ON
-      -DENABLE_BLUEZ=OFF
-      -DENABLE_FERAL_GAMEMODE=OFF
-      -DENABLE_OPENGL=OFF
-      -DENABLE_VULKAN=OFF
-      -DENABLE_METAL=ON
-      -DENABLE_DISCORD_RPC=OFF
-      -DENABLE_WXWIDGETS=OFF
-      -DCMAKE_MACOSX_BUNDLE=OFF
-      -DVCPKG_TARGET_TRIPLET=arm64-tvos
+    MINVER: "13.4"
+
+################################## MISC ####################################
+# webOS aarch64
+libretro-build-webos-aarch64:
+  extends:
+    - .libretro-webos-aarch64-make-default
+    - .core-defs
+
+#################################### TESTS ###################################
+# The network layer that stands in for libcurl and OpenSSL
+# (dependencies/curl-compat), against local HTTP and TLS servers.
+test-curl-compat:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+    CC: gcc-12
+    CXX: g++-12
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends python3 openssl
+  script:
+    - ./dependencies/curl-compat/test/run_tests.sh
+    - make -C dependencies/curl-compat/test clean
+    - SANITIZER=address,undefined ./dependencies/curl-compat/test/run_tests.sh
+    - make -C dependencies/curl-compat/test clean
+    - SANITIZER=thread ./dependencies/curl-compat/test/run_tests.sh

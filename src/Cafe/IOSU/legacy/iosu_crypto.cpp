@@ -1,12 +1,9 @@
 #include "iosu_crypto.h"
 
 #include "config/ActiveSettings.h"
-#include "openssl/bn.h"
-#include "openssl/obj_mac.h"
-#include "openssl/ec.h"
-#include "openssl/x509.h"
-#include "openssl/ssl.h"
-#include "openssl/ecdsa.h"
+#include <curl/curl.h>
+#include <crypto/pk.h>
+#include <crypto/x509.h>
 
 #include "util/crypto/aes128.h"
 #include "Common/FileStream.h"
@@ -24,10 +21,8 @@ struct
 	{
 		bool isValid;
 		sint32 id;
-		X509* cert;
 		std::vector<uint8> certData;
-		RSA* pkey;
-		std::vector<uint8> pkeyDERData;
+		std::vector<uint8> pkeyDERData; // RSAPrivateKey (PKCS#1)
 	}certList[256];
 	sint32 certListCount;
 }iosuCryptoCertificates = { 0 };
@@ -141,74 +136,6 @@ std::string iosuCrypto_base64Encode(unsigned char const* bytes_to_encode, unsign
 }
 static_assert(sizeof(CertECC_t) == sizeof(CertECC_t));
 
-EC_KEY* ECCPubKey_getPublicKey(ECCPubKey& pubKey) // verified and works
-{
-	BIGNUM* bn_r = BN_new();
-	BIGNUM* bn_s = BN_new();
-	BN_bin2bn(pubKey.keyData + 0, 30, bn_r);
-	BN_bin2bn(pubKey.keyData + 30, 30, bn_s);
-
-	EC_KEY* ec_pubKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-	int r = EC_KEY_set_public_key_affine_coordinates(ec_pubKey, bn_r, bn_s);
-
-	BN_free(bn_r);
-	BN_free(bn_s);
-
-	return ec_pubKey;
-}
-
-ECDSA_SIG* ECCPubKey_getSignature(CertECC_t& cert)
-{
-	BIGNUM* bn_r = BN_new();
-	BIGNUM* bn_s = BN_new();
-	BN_bin2bn(cert.signature + 0, 30, bn_r);
-	BN_bin2bn(cert.signature + 30, 30, bn_s);
-
-	//EC_KEY* ec_pubKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-	//int r = EC_KEY_set_public_key_affine_coordinates(ec_pubKey, bn_r, bn_s);
-	ECDSA_SIG* ec_sig = ECDSA_SIG_new();
-	//ECDSA_do_sign_ex
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	ECDSA_SIG_set0(ec_sig, bn_r, bn_s);
-#else
-	BN_copy(ec_sig->r, bn_r);
-	BN_copy(ec_sig->s, bn_s);
-#endif
-
-	BN_free(bn_r);
-	BN_free(bn_s);
-
-	return ec_sig;
-}
-
-void ECCPubKey_setSignature(CertECC_t& cert, ECDSA_SIG* sig)
-{
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	const BIGNUM* sig_r = nullptr, * sig_s = nullptr;
-	ECDSA_SIG_get0(sig, &sig_r, &sig_s);
-
-	sint32 lenR = BN_num_bytes(sig_r);
-	sint32 lenS = BN_num_bytes(sig_s);
-
-	cemu_assert_debug(lenR <= 30);
-	cemu_assert_debug(lenS <= 30);
-
-	memset(cert.signature, 0, sizeof(cert.signature));
-	BN_bn2bin(sig_r, cert.signature + (30 - lenR));
-	BN_bn2bin(sig_s, cert.signature + 60 / 2 + (30 - lenS));
-#else
-	sint32 lenR = BN_num_bytes(sig->r);
-	sint32 lenS = BN_num_bytes(sig->s);
-
-	cemu_assert_debug(lenR <= 30);
-	cemu_assert_debug(lenS <= 30);
-
-	memset(cert.signature, 0, sizeof(cert.signature));
-	BN_bn2bin(sig->r, cert.signature + (30 - lenR));
-	BN_bn2bin(sig->s, cert.signature + 60 / 2 + (30 - lenS));
-#endif
-}
-
 ECCPrivKey g_consoleCertPrivKey{};
 
 void iosuCrypto_getDeviceCertPrivateKey(void* privKeyOut, sint32 len)
@@ -260,36 +187,9 @@ void iosuCrypto_generateDeviceCertificate()
 	iosuCrypto_readOtpData(privateKey, 0x88, 0x1E);
 	memcpy(g_consoleCertPrivKey.keyData, privateKey, 30);
 
-	auto context = BN_CTX_new();
-	BN_CTX_start(context);
-	BIGNUM* bn_privKey = BN_CTX_get(context);
-	BN_bin2bn(privateKey, 0x1E, bn_privKey);
-
-	EC_GROUP *group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-	EC_POINT *pubkey = EC_POINT_new(group);
-
-	EC_POINT_mul(group, pubkey, bn_privKey, NULL, NULL, NULL);
-
-	BIGNUM* bn_x = BN_CTX_get(context);
-	BIGNUM* bn_y = BN_CTX_get(context);	
-
-	EC_POINT_get_affine_coordinates(group, pubkey, bn_x, bn_y, NULL);
-
-	uint8 publicKeyOutput[0x3C];
-	memset(publicKeyOutput, 0, sizeof(publicKeyOutput));
-
-	sint32 lenX = BN_num_bytes(bn_x);
-	sint32 lenY = BN_num_bytes(bn_y);
-
-	BN_bn2bin(bn_x, publicKeyOutput + (0x1E - lenX)); // todo - verify if the bias is correct
-	BN_bn2bin(bn_y, publicKeyOutput + 0x3C / 2 + (0x1E - lenY));
-
-	memcpy(g_wiiuDeviceCert.publicKey, publicKeyOutput, 0x3C);
-
-	// clean up
-	EC_POINT_free(pubkey);
-	BN_CTX_end(context); // clears all BN variables
-	BN_CTX_free(context);
+	uint8 point[B233_POINT_SIZE];
+	if (b233_keygen(privateKey, point) == 0)
+		memcpy(g_wiiuDeviceCert.publicKey, point + 1, 0x3C);
 }
 
 sint32 iosuCrypto_getDeviceCertificateBase64Encoded(char* output)
@@ -300,9 +200,28 @@ sint32 iosuCrypto_getDeviceCertificateBase64Encoded(char* output)
 	return len;
 }
 
+// The length of the DER element at @der, header included; 0 if it does
+// not fit in @len.
+static size_t iosuCrypto_derLength(const uint8* der, size_t len)
+{
+	if (len < 2)
+		return 0;
+	size_t n = der[1], hdr = 2;
+	if (n & 0x80)
+	{
+		const size_t bytes = n & 0x7F;
+		if (bytes == 0 || bytes > 4 || len < 2 + bytes)
+			return 0;
+		n = 0;
+		for (size_t i = 0; i < bytes; i++)
+			n = (n << 8) | der[2 + i];
+		hdr += bytes;
+	}
+	return hdr + n <= len ? hdr + n : 0;
+}
+
 bool iosuCrypto_loadCertificate(uint32 id, std::wstring_view mlcSubpath, std::wstring_view pkeyMlcSubpath)
 {
-	X509* cert = nullptr;
 	// load cert data
 	const auto certPath = ActiveSettings::GetMlcPath(mlcSubpath);
 	auto certData = FileStream::LoadIntoMemory(certPath);
@@ -325,78 +244,56 @@ bool iosuCrypto_loadCertificate(uint32 id, std::wstring_view mlcSubpath, std::ws
 			return false;
 		}
 	}
-	// load certificate
-	unsigned char* tempPtr = (unsigned char*)certData->data();
-	cert = d2i_X509(nullptr, (const unsigned char**)&tempPtr, certData->size());
-	if (cert == nullptr)
+	// check the certificate
+	struct x509_cert parsedCert;
+	if (x509_parse(&parsedCert, certData->data(), certData->size()) != 0)
 	{
 		cemuLog_log(LogType::Force, "IOSU_CRYPTO: Unable to load certificate \"{}\"", boost::nowide::narrow(std::wstring(mlcSubpath)));
 		return false;
 	}
 	// load optional rsa key
-	RSA* pkeyRSA = nullptr;
 	if (pkeyData)
 	{
 		cemu_assert((pkeyData->size() & 15) == 0);
 		uint8 aesKey[16];
 		uint8 iv[16] = { 0 };
-		uint8 pkeyDecryptedData[4096];
+		std::vector<uint8> pkeyDecryptedData(pkeyData->size());
 		// decrypt pkey
 		iosuCrypto_readOtpData(aesKey, 0x120 / 4, 16);
-		AES128_CBC_decrypt(pkeyDecryptedData, pkeyData->data(), pkeyData->size(), aesKey, iv);
-		// convert to OpenSSL RSA pkey
-		unsigned char* pkeyTempPtr = pkeyDecryptedData;
-		pkeyRSA = d2i_RSAPrivateKey(nullptr, (const unsigned char **)&pkeyTempPtr, pkeyData->size());
-		if (pkeyRSA == nullptr)
+		AES128_CBC_decrypt(pkeyDecryptedData.data(), pkeyData->data(), pkeyData->size(), aesKey, iv);
+		// the key is a DER RSAPrivateKey, padded to the AES block size
+		const size_t derLen = iosuCrypto_derLength(pkeyDecryptedData.data(), pkeyDecryptedData.size());
+		struct rsa_private_key rsaKey;
+		if (derLen == 0 || x509_rsa_private_key_parse(&rsaKey, pkeyDecryptedData.data(), derLen) != 0)
 		{
 			cemuLog_log(LogType::Force, "IOSU_CRYPTO: Unable to decrypt private key \"{}\"", boost::nowide::narrow(std::wstring(pkeyMlcSubpath)));
 			return false;
 		}
-		// encode private key as DER
-		EVP_PKEY *evpPkey = EVP_PKEY_new();
-		EVP_PKEY_assign_RSA(evpPkey, pkeyRSA);
-		std::vector<uint8> derPKeyData(1024 * 32);
-		unsigned char* derPkeyTemp = derPKeyData.data();
-		sint32 derPkeySize = i2d_PrivateKey(evpPkey, &derPkeyTemp);
-		derPKeyData.resize(derPkeySize);
-		derPKeyData.shrink_to_fit();
-		iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].pkeyDERData = derPKeyData;
+		pkeyDecryptedData.resize(derLen);
+		iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].pkeyDERData = std::move(pkeyDecryptedData);
 	}
 
 	// register certificate and optional pkey
-	iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].cert = cert;
 	iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].certData = *certData;
-	iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].pkey = pkeyRSA;
 	iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].id = id;
 	iosuCryptoCertificates.certList[iosuCryptoCertificates.certListCount].isValid = true;
 	iosuCryptoCertificates.certListCount++;
 	return true;
 }
 
-bool iosuCrypto_addClientCertificate(void* sslctx, sint32 certificateId)
+bool iosuCrypto_addClientCertificate(void* tlsSettings, sint32 certificateId)
 {
-	SSL_CTX* ctx = (SSL_CTX*)sslctx;
 	// find entry
 	for (sint32 i = 0; i < iosuCryptoCertificates.certListCount; i++)
 	{
-		if (iosuCryptoCertificates.certList[i].isValid && iosuCryptoCertificates.certList[i].id == certificateId)
+		auto& entry = iosuCryptoCertificates.certList[i];
+		if (entry.isValid && entry.id == certificateId)
 		{
-			if (SSL_CTX_use_certificate(ctx, iosuCryptoCertificates.certList[i].cert) != 1)
+			if (entry.pkeyDERData.empty() || !curl_tls_set_client((curl_tls_settings*)tlsSettings, entry.certData.data(), entry.certData.size(), entry.pkeyDERData.data(), entry.pkeyDERData.size()))
 			{
 				cemuLog_log(LogType::Force, "Unable to setup certificate {}", certificateId);
 				return false;
 			}
-			if (SSL_CTX_use_RSAPrivateKey(ctx, iosuCryptoCertificates.certList[i].pkey) != 1)
-			{
-				cemuLog_log(LogType::Force, "Unable to setup certificate {} RSA private key", certificateId);
-				return false;
-			}
-
-			if (SSL_CTX_check_private_key(ctx) == false)
-			{
-				cemuLog_log(LogType::Force, "Certificate private key could not be validated (verify required files for online mode or disable online mode)");
-			}
-
 			return true;
 		}
 	}
@@ -404,35 +301,27 @@ bool iosuCrypto_addClientCertificate(void* sslctx, sint32 certificateId)
 	return false;
 }
 
-bool iosuCrypto_addCACertificate(void* sslctx, sint32 certificateId)
+bool iosuCrypto_addCACertificate(void* tlsSettings, sint32 certificateId)
 {
-	SSL_CTX* ctx = (SSL_CTX*)sslctx;
 	// find entry
 	for (sint32 i = 0; i < iosuCryptoCertificates.certListCount; i++)
 	{
-		if (iosuCryptoCertificates.certList[i].isValid && iosuCryptoCertificates.certList[i].id == certificateId)
-		{
-			X509_STORE* store = SSL_CTX_get_cert_store((SSL_CTX*)sslctx);
-			X509_STORE_add_cert(store, iosuCryptoCertificates.certList[i].cert);
-			return true;
-		}
+		auto& entry = iosuCryptoCertificates.certList[i];
+		if (entry.isValid && entry.id == certificateId)
+			return curl_tls_add_trust((curl_tls_settings*)tlsSettings, entry.certData.data(), entry.certData.size());
 	}
 	return false;
 }
 
-bool iosuCrypto_addCustomCACertificate(void* sslctx, uint8* certData, sint32 certLength)
+bool iosuCrypto_addCustomCACertificate(void* tlsSettings, uint8* certData, sint32 certLength)
 {
-	SSL_CTX* ctx = (SSL_CTX*)sslctx;
-	X509_STORE* store = SSL_CTX_get_cert_store((SSL_CTX*)sslctx);
-	unsigned char* tempPtr = (unsigned char*)certData;
-	X509* cert = d2i_X509(NULL, (const unsigned char**)&tempPtr, certLength);
-	if (cert == nullptr)
+	struct x509_cert parsedCert;
+	if (certLength <= 0 || x509_parse(&parsedCert, certData, (size_t)certLength) != 0)
 	{
 		cemuLog_log(LogType::Force, "Invalid custom server PKI certificate");
 		return false;
 	}
-	X509_STORE_add_cert(store, cert);
-	return true;
+	return curl_tls_add_trust((curl_tls_settings*)tlsSettings, certData, (size_t)certLength);
 }
 
 uint8* iosuCrypto_getCertificateDataById(sint32 certificateId, sint32* certificateSize)

@@ -6,8 +6,7 @@
 #include <algorithm>
 #include <mutex>
 
-#include "openssl/evp.h" /* EVP_Digest */
-#include "openssl/sha.h" /* SHA256_DIGEST_LENGTH */
+#include "util/crypto/sha.h"
 #include "Cafe/Account/Account.h"
 #include "config/ActiveSettings.h"
 #include "util/helpers/helpers.h"
@@ -751,8 +750,7 @@ int iosuAct_thread()
 					//   6 bytes from the end of UUID
 					// bytes 10-15 are used from the hash and replace the last 6 bytes of the UUID
 
-					EVP_MD_CTX *ctx_sha256 = EVP_MD_CTX_new();
-					EVP_DigestInit(ctx_sha256, EVP_sha256());
+					ShaStream ctx_sha256(false);
 
 					uint32 name = (uint32)actCemuRequest->uuidName;
 					uint8 tempArray[] = {
@@ -765,11 +763,10 @@ int iosuAct_thread()
 						0x5E,
 						0x09,
 					};
-					EVP_DigestUpdate(ctx_sha256, tempArray, sizeof(tempArray));
-					EVP_DigestUpdate(ctx_sha256, actCemuRequest->resultBinary.binBuffer+10, 6);
+					ctx_sha256.Update(tempArray, sizeof(tempArray));
+					ctx_sha256.Update(actCemuRequest->resultBinary.binBuffer+10, 6);
 					uint8 h[SHA256_DIGEST_LENGTH];
-					EVP_DigestFinal_ex(ctx_sha256, h, NULL);
-					EVP_MD_CTX_free(ctx_sha256);
+					ctx_sha256.Final(h);
 
 					memcpy(actCemuRequest->resultBinary.binBuffer + 0xA, h + 0xA, 6);
 				}

@@ -1,10 +1,10 @@
 name: Build libretro core
 
-# Builds cemu_libretro for every target the core currently supports and uploads
-# each result as an artifact, so a release can be assembled from them.
-#
-# The Android jobs mirror .gitlab-ci.yml, whose android-cmake template has
-# nowhere to run (this core is not on git.libretro.com).
+# Builds parallel_gx2_libretro with the Makefile for every target the core
+# currently supports and uploads each result as an artifact, so a release
+# can be assembled from them. The dependencies are submodules built with
+# the core, so a job installs no libraries beyond the system's GL and X11
+# headers on Linux. Also runs the network layer's tests.
 
 on:
   push:
@@ -19,9 +19,6 @@ on:
         type: string
         default: all
 
-env:
-  VCPKG_ROOT: "${{github.workspace}}/dependencies/vcpkg"
-
 # Test builds can be limited to the platforms their testers use: the
 # platforms input (workflow_dispatch) lists them. Pushes and "all" build
 # everything.
@@ -30,7 +27,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'linux')
     name: linux-${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 350
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -48,52 +45,44 @@ jobs:
           fetch-depth: 0
 
       - name: "Install dependencies"
+        # the headers the OpenGL and Vulkan surfaces are declared with
         run: |
           sudo apt update -qq
-          sudo apt install -y --no-install-recommends \
-            cmake ninja-build nasm autoconf automake libtool pkg-config python3 \
-            libglm-dev libgl1-mesa-dev libegl1-mesa-dev freeglut3-dev \
-            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
-            libxss-dev libxkbcommon-dev libwayland-dev wayland-protocols \
-            libudev-dev libdbus-1-dev libgcrypt20-dev libpulse-dev \
-            libsecret-1-dev libsystemd-dev libbluetooth-dev
-
-      - name: "Bootstrap vcpkg"
-        run: bash ./dependencies/vcpkg/bootstrap-vcpkg.sh
-
-      - name: "Configure"
-        # Flags as documented in README.md, plus the two the GitLab job turns
-        # off because the core does not use them.
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_LIBRETRO=ON \
-            -DENABLE_WXWIDGETS=OFF \
-            -DENABLE_DISCORD_RPC=OFF \
-            -DENABLE_CUBEB=OFF \
-            -DENABLE_BLUEZ=OFF \
-            -DENABLE_FERAL_GAMEMODE=OFF \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          sudo apt install -y --no-install-recommends g++-12 \
+            libgl-dev libegl-dev libx11-dev libxrender-dev libx11-xcb-dev
 
       - name: "Build"
-        run: cmake --build build --target cemu_libretro -- -j $(nproc)
+        run: make -j $(nproc) CC=gcc-12 CXX=g++-12
 
       - name: "Upload artifact"
         uses: actions/upload-artifact@v6
         with:
-          name: cemu_libretro-linux-${{ matrix.arch }}
-          path: ./bin/cemu_libretro.so
+          name: parallel_gx2_libretro-linux-${{ matrix.arch }}
+          path: ./parallel_gx2_libretro.so
+
+  tests:
+    if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'linux')
+    name: tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v6
+
+      - name: "curl_compat against local servers"
+        # plain, then under AddressSanitizer + UBSan, then ThreadSanitizer
+        run: |
+          ./dependencies/curl-compat/test/run_tests.sh
+          make -C dependencies/curl-compat/test clean
+          SANITIZER=address,undefined ./dependencies/curl-compat/test/run_tests.sh
+          make -C dependencies/curl-compat/test clean
+          SANITIZER=thread ./dependencies/curl-compat/test/run_tests.sh
 
   macos:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'macos')
     name: macos-${{ matrix.arch }}
     runs-on: macos-14
-    # First macOS build of the core: src/CMakeLists.txt already keeps the X11/GL
-    # link line to `UNIX AND NOT APPLE` and defines VK_USE_PLATFORM_MACOS_MVK,
-    # but nothing here has ever been through a compiler. Same treatment as the
-    # Windows job until it has.
-    continue-on-error: true
-    timeout-minutes: 350
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -106,58 +95,23 @@ jobs:
           submodules: "recursive"
           fetch-depth: 0
 
-      - name: "Install dependencies"
-        run: brew install nasm automake libtool
-
-      - name: "Install molten-vk"
-        # The Vulkan renderer links against the loader; on macOS that is
-        # MoltenVK, the release upstream's macOS build uses.
-        run: |
-          curl -L -O https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-macos-privateapi.tar
-          tar xf MoltenVK-macos-privateapi.tar
-          sudo mkdir -p /usr/local/lib
-          sudo cp MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib /usr/local/lib
-
-      - name: "Setup cmake"
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.29.0'
-
-      - name: "Bootstrap vcpkg"
-        run: bash ./dependencies/vcpkg/bootstrap-vcpkg.sh
-
-      - name: "Configure"
-        # Same flags as the Linux job; BLUEZ and FERAL_GAMEMODE are Linux-only
-        # options that are already off here, and the architecture is passed the
-        # way the standalone macOS build passes it, so vcpkg picks the matching
-        # triplet for the x86_64 slice on this arm64 runner.
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-            -DENABLE_LIBRETRO=ON \
-            -DENABLE_WXWIDGETS=OFF \
-            -DENABLE_DISCORD_RPC=OFF \
-            -DENABLE_CUBEB=OFF \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-
       - name: "Build"
-        run: cmake --build build --target cemu_libretro -- -j $(sysctl -n hw.ncpu)
+        run: make -j $(sysctl -n hw.ncpu) platform=osx arch=${{ matrix.arch }}
 
       - name: "Upload artifact"
         uses: actions/upload-artifact@v6
         with:
-          name: cemu_libretro-macos-${{ matrix.arch }}
-          path: ./bin/cemu_libretro.dylib
+          name: parallel_gx2_libretro-macos-${{ matrix.arch }}
+          path: ./parallel_gx2_libretro.dylib
 
   windows:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'windows')
     name: windows-x64
     runs-on: windows-2022
-    # The WGL path in the glue layer has never been through a compiler; give it
-    # a run without failing the whole workflow over it.
-    continue-on-error: true
-    timeout-minutes: 350
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
 
     steps:
       - name: "Checkout repo"
@@ -166,54 +120,34 @@ jobs:
           submodules: "recursive"
           fetch-depth: 0
 
-      - name: "Setup cmake"
-        uses: jwlawson/actions-setup-cmake@v2
+      - name: "Set up MSYS2"
+        uses: msys2/setup-msys2@v2
         with:
-          cmake-version: '3.29.0'
-
-      - name: "Bootstrap vcpkg"
-        run: ./dependencies/vcpkg/bootstrap-vcpkg.bat
-
-      - name: "Configure"
-        # RelWithDebInfo instead of Release: same optimization level for MSVC,
-        # but keeps a PDB around so a crash dump/live debug session resolves to
-        # real function names instead of the nearest export + a huge offset.
-        run: |
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_LIBRETRO=ON -DENABLE_WXWIDGETS=OFF -DENABLE_DISCORD_RPC=OFF -DENABLE_CUBEB=OFF -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+          msystem: MINGW64
+          install: make git mingw-w64-x86_64-gcc
 
       - name: "Build"
-        run: cmake --build build --target cemu_libretro --config RelWithDebInfo
+        run: make -j $(nproc)
 
       - name: "Upload artifact"
         uses: actions/upload-artifact@v6
         with:
-          name: cemu_libretro-windows-x64
-          path: ./bin/cemu_libretro.dll
-
-      # The symbols, for reading crash offsets, apart from the core so that
-      # downloading the core does not mean downloading them too
-      - name: "Upload symbols"
-        uses: actions/upload-artifact@v6
-        with:
-          name: cemu_libretro-windows-x64-pdb
-          path: ./bin/cemu_libretro.pdb
+          name: parallel_gx2_libretro-windows-x64
+          path: ./parallel_gx2_libretro.dll
 
   android:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'android')
     name: android-${{ matrix.abi }}
     runs-on: ubuntu-22.04
-    # This target has never been built: the whole vcpkg set has to come up for a
-    # cross triplet first, so do not fail the run over it.
-    continue-on-error: true
-    timeout-minutes: 350
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
           - abi: arm64-v8a
-            triplet: arm64-android
+            platform: android-arm64
           - abi: x86_64
-            triplet: x64-android
+            platform: android-x86_64
 
     steps:
       - name: "Checkout repo"
@@ -222,43 +156,12 @@ jobs:
           submodules: "recursive"
           fetch-depth: 0
 
-      - name: "Install host dependencies"
-        run: |
-          sudo apt update -qq
-          sudo apt install -y --no-install-recommends \
-            nasm autoconf automake libtool pkg-config python3 ninja-build
-
-      - name: "Bootstrap vcpkg"
-        run: bash ./dependencies/vcpkg/bootstrap-vcpkg.sh
-
-      - name: "Configure"
-        # API level 28, as in the GitLab job: bionic gained iconv (which SDL2
-        # links against) and aligned_alloc there, and the template's default of
-        # 16 is useless for C++20 anyway. CMAKE_TOOLCHAIN_FILE is the NDK's -
-        # the top-level CMakeLists turns it into a vcpkg chainload toolchain.
-        run: |
-          cmake -DCMAKE_BUILD_TYPE=Release \
-            -DENABLE_LIBRETRO=ON \
-            -DENABLE_BLUEZ=OFF \
-            -DENABLE_FERAL_GAMEMODE=OFF \
-            -DENABLE_WAYLAND=OFF \
-            -DENABLE_DISCORD_RPC=OFF \
-            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
-            -DVCPKG_HOST_TRIPLET=x64-linux \
-            -DANDROID_PLATFORM=android-28 \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_STL=c++_static \
-            -DANDROID_ABI=${{ matrix.abi }} \
-            . -Bbuild/android-${{ matrix.abi }}
-
       - name: "Build"
-        run: cmake --build build/android-${{ matrix.abi }} --target cemu_libretro --config Release -- -j $(nproc)
-
-      - name: "Prepare artifact"
-        run: mv bin/cemu_libretro.so cemu_libretro_android.so
+        # API level 28: bionic has aligned_alloc there, and C++20 wants it
+        run: make -j $(nproc) platform=${{ matrix.platform }} ANDROID_API=28 NDK_ROOT=$ANDROID_NDK_LATEST_HOME
 
       - name: "Upload artifact"
         uses: actions/upload-artifact@v6
         with:
-          name: cemu_libretro-android-${{ matrix.abi }}
-          path: ./cemu_libretro_android.so
+          name: parallel_gx2_libretro-android-${{ matrix.abi }}
+          path: ./parallel_gx2_libretro_android.so
