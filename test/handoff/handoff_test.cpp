@@ -47,6 +47,9 @@
 //    item taken exactly once, each producer's in order where promised, a pop
 //    asleep until there is something, and the MPMC overflow past its ring
 //    handed back to sleeping consumers;
+//  - ClaimTicket (the shader compile pool): a queued shader is compiled once,
+//    by a pool thread or by the thread that needs it now, never after it was
+//    destroyed, and a destroyed one's ticket left in the queue is harmless;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -67,6 +70,7 @@
 #include "util/helpers/AtomicPtrBag.h"
 #include "util/helpers/MpscQueue.h"
 #include "util/helpers/MpmcQueue.h"
+#include "util/helpers/ClaimTicket.h"
 #include "Cafe/HW/Espresso/PPCTimerClock.h"
 #include <set>
 #include "libretro.h"
@@ -1046,6 +1050,97 @@ static void TestMpmcQueue()
 	CHECK(all);
 }
 
+// --- shader compile pool --------------------------------------------------
+
+struct FakeShader
+{
+	ClaimTicket<FakeShader>* ticket;
+	std::atomic<int> state{0}; // 0 queued, 1 compiling, 2 done
+	std::atomic<int> compiles{0};
+	uint64_t canary = 0xC0FFEE;
+};
+
+static void TestClaimTicket()
+{
+	static ImmortalEventWake s_done;
+	MpmcQueue<ClaimTicket<FakeShader>*> queue;
+	std::atomic_bool bad{false};
+	auto compile = [&](FakeShader* sh) {
+		if (sh->canary != 0xC0FFEE)
+			bad.store(true); // a destroyed one
+		sh->state.store(1);
+		sh->compiles.fetch_add(1);
+		sh->state.store(2, std::memory_order_release);
+		s_done->Notify();
+	};
+	auto waitDone = [&](FakeShader* sh) {
+		s_done->WaitUntil([sh] { return sh->state.load(std::memory_order_acquire) == 2; });
+	};
+	std::vector<std::thread> pool;
+	for (int t = 0; t < 2; t++)
+		pool.emplace_back([&] {
+			for (;;)
+			{
+				auto* ticket = queue.pop();
+				if (!ticket)
+					return;
+				FakeShader* sh = ticket->Claim();
+				ticket->Release();
+				if (sh)
+					compile(sh);
+			}
+		});
+	int compiled = 0;
+	for (int i = 0; i < 30000; i++)
+	{
+		FakeShader* sh = new FakeShader();
+		sh->ticket = new ClaimTicket<FakeShader>(sh);
+		queue.push(sh->ticket);
+		const int what = i % 3;
+		if (what == 1)
+		{
+			// PreponeCompilation: compiled here, or waited for
+			if (FakeShader* mine = sh->ticket->Claim())
+				compile(mine);
+			else
+				waitDone(sh);
+		}
+		// the destructor (every one, now or right after the prepone)
+		if (what != 2 || (i % 6) == 2)
+		{
+			// as ~RendererShaderVk: taken by someone else means compiled or
+			// being compiled - and the destructor waits for it
+			if (sh->ticket->Claim() == nullptr)
+				waitDone(sh);
+			if (sh->compiles.load() > 1)
+				bad.store(true);
+			compiled += sh->compiles.load();
+			sh->ticket->Release();
+			sh->canary = 0;
+			delete sh;
+		}
+		else
+		{
+			// left alive: some compile thread gets to it
+			waitDone(sh);
+			if (sh->compiles.load() != 1)
+				bad.store(true);
+			compiled++;
+			if (sh->ticket->Claim() != nullptr)
+				bad.store(true);
+			sh->ticket->Release();
+			sh->canary = 0;
+			delete sh;
+		}
+	}
+	for (size_t t = 0; t < pool.size(); t++)
+		queue.push(nullptr);
+	for (auto& t : pool)
+		t.join();
+	CHECK(!bad.load());
+	CHECK(compiled > 0);
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -1266,6 +1361,7 @@ int main()
 	TestAtomicPtrBag();
 	TestMpscQueue();
 	TestMpmcQueue();
+	TestClaimTicket();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

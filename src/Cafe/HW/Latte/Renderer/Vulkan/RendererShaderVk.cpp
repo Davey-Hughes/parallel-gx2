@@ -3,7 +3,8 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #include "config/ActiveSettings.h"
 #include "config/CemuConfig.h"
-#include "util/helpers/ConcurrentQueue.h"
+#include "util/helpers/MpmcQueue.h"
+#include "util/helpers/EventWake.h"
 #include "Cemu/FileCache/FileCache.h"
 
 #include "Cafe/HW/Latte/Renderer/Vulkan/RslcGlsl.h"
@@ -15,6 +16,12 @@ class FileCache* s_spirvCache{nullptr};
 
 extern std::atomic_int g_compiled_shaders_total;
 extern std::atomic_int g_compiled_shaders_async;
+
+// The compile queue holds a ClaimTicket for each shader (ClaimTicket.h):
+// whoever compiles it - a compile thread, PreponeCompilation on the thread
+// that needs it now, or the destructor of one never compiled - claims it.
+// Every shader's DONE notifies it; each waiter has its own shader to check
+static ImmortalEventWake s_shaderCompiledWake;
 
 class _ShaderVkThreadPool
 {
@@ -33,8 +40,9 @@ public:
 	{
 		if (!m_threadsActive.exchange(false))
 			return;
+		// one empty ticket per thread, each of which leaves at one
 		for (uint32 i = 0; i < s_threads.size(); ++i)
-			s_compilationQueueCount.increment();
+			s_compilationQueue.push(nullptr);
 		for (auto& it : s_threads)
 			it.join();
 		s_threads.clear();
@@ -48,28 +56,24 @@ public:
 	void CompilerThreadFunc()
 	{
 		SetThreadName("vkShaderComp");
-		while (m_threadsActive.load(std::memory_order::relaxed))
+		while (true)
 		{
-			s_compilationQueueCount.decrementWithWait();
-			s_compilationQueueMutex.lock();
-			if (s_compilationQueue.empty())
+			ShaderCompileTicket* ticket = s_compilationQueue.pop();
+			if (!ticket)
 			{
-				// queue empty again, shaders compiled synchronously via PreponeCompilation()
-				s_compilationQueueMutex.unlock();
+				if (!m_threadsActive.load(std::memory_order::relaxed))
+					return;
 				continue;
 			}
-			RendererShaderVk* job = s_compilationQueue.front();
-			s_compilationQueue.pop_front();
-			// set compilation state
-			cemu_assert_debug(job->m_compilationState.getValue() == RendererShaderVk::COMPILATION_STATE::QUEUED);
-			job->m_compilationState.setValue(RendererShaderVk::COMPILATION_STATE::COMPILING);
-			s_compilationQueueMutex.unlock();
-			// compile
+			RendererShaderVk* job = ticket->Claim();
+			ticket->Release();
+			if (!job)
+				continue; // compiled synchronously via PreponeCompilation(), or gone
+			cemu_assert_debug(job->m_compilationState.load() == RendererShaderVk::COMPILATION_STATE::QUEUED);
+			job->m_compilationState.store(RendererShaderVk::COMPILATION_STATE::COMPILING, std::memory_order_release);
 			job->CompileInternal(false);
 			++g_compiled_shaders_async;
-			// mark as compiled
-			cemu_assert_debug(job->m_compilationState.getValue() == RendererShaderVk::COMPILATION_STATE::COMPILING);
-			job->m_compilationState.setValue(RendererShaderVk::COMPILATION_STATE::DONE);
+			job->SetCompiled();
 		}
 	}
 
@@ -77,10 +81,7 @@ public:
 
 public:
 	std::vector<std::thread> s_threads;
-
-	std::deque<RendererShaderVk*> s_compilationQueue;
-	CounterSemaphore s_compilationQueueCount;
-	std::mutex s_compilationQueueMutex;
+	MpmcQueue<ShaderCompileTicket*> s_compilationQueue;
 
 private:
 	std::atomic<bool> m_threadsActive;
@@ -90,16 +91,23 @@ RendererShaderVk::RendererShaderVk(ShaderType type, uint64 baseHash, uint64 auxH
 	: RendererShader(type, baseHash, auxHash, isGameShader, isGfxPackShader), m_glslCode(glslCode)
 {
 	// start async compilation
-	ShaderVkThreadPool.s_compilationQueueMutex.lock();
-	m_compilationState.setValue(COMPILATION_STATE::QUEUED);
-	ShaderVkThreadPool.s_compilationQueue.push_back(this);
-	ShaderVkThreadPool.s_compilationQueueCount.increment();
-	ShaderVkThreadPool.s_compilationQueueMutex.unlock();
+	m_compilationState.store(COMPILATION_STATE::QUEUED, std::memory_order_relaxed);
+	m_ticket = new ShaderCompileTicket(this);
+	ShaderVkThreadPool.s_compilationQueue.push(m_ticket);
 	cemu_assert_debug(ShaderVkThreadPool.HasThreadsRunning()); // make sure .StartThreads() was called
 }
 
 RendererShaderVk::~RendererShaderVk()
 {
+	if (m_ticket)
+	{
+		// Never compiled: the queue lets go of the ticket without touching this.
+		// Being compiled: done first, the compile thread uses this until then.
+		if (m_ticket->Claim() == nullptr)
+			WaitUntilCompiled();
+		m_ticket->Release();
+		m_ticket = nullptr;
+	}
 	list_pipelineInfo.ForEachTaken([](PipelineInfo* p) { delete p; });
 
 	VkDevice vkDev = VulkanRenderer::GetInstance()->GetLogicalDevice();
@@ -235,37 +243,42 @@ void RendererShaderVk::CompileInternal(bool isRenderThread)
 
 void RendererShaderVk::PreponeCompilation(bool isRenderThread)
 {
-	ShaderVkThreadPool.s_compilationQueueMutex.lock();
-	bool isStillQueued = m_compilationState.hasState(COMPILATION_STATE::QUEUED);
-	if (isStillQueued)
-	{
-		// remove from queue
-		ShaderVkThreadPool.s_compilationQueue.erase(std::remove(ShaderVkThreadPool.s_compilationQueue.begin(), ShaderVkThreadPool.s_compilationQueue.end(), this), ShaderVkThreadPool.s_compilationQueue.end());
-		m_compilationState.setValue(COMPILATION_STATE::COMPILING);
-	}
-	ShaderVkThreadPool.s_compilationQueueMutex.unlock();
+	// Taken out of its ticket here, it is this thread's to compile; already
+	// taken, a compile thread has it (or had it)
+	const bool isStillQueued = m_ticket && m_ticket->Claim() != nullptr;
 	if (!isStillQueued)
 	{
-		m_compilationState.waitUntilValue(COMPILATION_STATE::DONE);
+		WaitUntilCompiled();
 		--g_compiled_shaders_async; // compilation caused a stall so we don't consider this one async
 		return;
 	}
-	else
-	{
-		// compile synchronously
-		CompileInternal(isRenderThread);
-		m_compilationState.setValue(COMPILATION_STATE::DONE);
-	}
+	// compile synchronously
+	m_compilationState.store(COMPILATION_STATE::COMPILING, std::memory_order_release);
+	CompileInternal(isRenderThread);
+	SetCompiled();
+}
+
+void RendererShaderVk::SetCompiled()
+{
+	m_compilationState.store(COMPILATION_STATE::DONE, std::memory_order_release);
+	s_shaderCompiledWake->Notify();
+}
+
+void RendererShaderVk::WaitUntilCompiled()
+{
+	s_shaderCompiledWake->WaitUntil([this] {
+		return m_compilationState.load(std::memory_order_acquire) == COMPILATION_STATE::DONE;
+	});
 }
 
 bool RendererShaderVk::IsCompiled()
 {
-	return m_compilationState.hasState(COMPILATION_STATE::DONE);
+	return m_compilationState.load(std::memory_order_acquire) == COMPILATION_STATE::DONE;
 };
 
 bool RendererShaderVk::WaitForCompiled()
 {
-	m_compilationState.waitUntilValue(COMPILATION_STATE::DONE);
+	WaitUntilCompiled();
 	return true;
 }
 

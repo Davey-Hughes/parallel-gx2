@@ -1,11 +1,15 @@
 #pragma once
 
 #include "Cafe/HW/Latte/Renderer/RendererShader.h"
-#include "util/helpers/ConcurrentQueue.h"
 
 #include <vulkan/vulkan_core.h>
 #include "util/helpers/Semaphore.h"
 #include "util/helpers/AtomicPtrBag.h"
+#include "util/helpers/ClaimTicket.h"
+#include <atomic>
+
+class RendererShaderVk;
+using ShaderCompileTicket = ClaimTicket<RendererShaderVk>;
 
 class RendererShaderVk : public RendererShader
 {
@@ -57,7 +61,14 @@ private:
 
 	VkShaderModule m_shader_module = nullptr;
 
-	StateSemaphore<COMPILATION_STATE> m_compilationState{ COMPILATION_STATE::NONE };
+	// No lock (a mutex and condition variable before): the state is atomic,
+	// DONE notifies one wake every waiter shares, and which of a compile
+	// thread and PreponeCompilation compiles a queued shader is decided by
+	// who takes it out of its ticket (RendererShaderVk.cpp)
+	std::atomic<COMPILATION_STATE> m_compilationState{ COMPILATION_STATE::NONE };
+	ClaimTicket<RendererShaderVk>* m_ticket{ nullptr };
+	void SetCompiled();
+	void WaitUntilCompiled();
 
 	std::string m_glslCode;
 

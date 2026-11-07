@@ -94,7 +94,8 @@ jobs:
         # and log.txt, the Vulkan queue lock and the motion and rumble
         # handoffs take no lock, nor AX's use of the audio devices, guest
         # time reads, the CPU's data cache flush reports, or the Vulkan
-        # pipeline cache's compile threads, or the worker queues
+        # pipeline cache's compile threads, the worker queues or the shader
+        # compile pool
         run: ./tools/check_gpu_waits.sh
 
       - name: "curl_compat against local servers"
