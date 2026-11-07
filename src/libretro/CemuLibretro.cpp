@@ -44,6 +44,7 @@
 #include "Cafe/TitleList/TitleConverter.h"
 #include "Cafe/TitleList/GameInfo.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 #include "Cafe/HW/Latte/Core/LatteTiming.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #ifdef ENABLE_OPENGL
@@ -5249,13 +5250,14 @@ static void libretro_prepare_and_launch_title()
 	// Under OpenGL the GPU is a cothread of this thread (Latte.h), and getting
 	// there - graphic packs, the shader cache - is work this thread does by
 	// running it.
-	while (!g_isGPUInitFinished && Latte_IsGpuThreadAlive())
+	// Otherwise the GPU thread says when it is done, or gone (LatteGpuWake).
+	if (Latte_IsGpuCothread())
 	{
-		if (Latte_IsGpuCothread())
+		while (!g_isGPUInitFinished && Latte_IsGpuThreadAlive())
 			Latte_ServeGpu();
-		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
+	else
+		LatteGpuWake_WaitUntil([] { return g_isGPUInitFinished.load() || !Latte_IsGpuThreadAlive(); });
 
 	// Keep TV screen as default (DRC is black for some games)
 
@@ -5414,6 +5416,8 @@ static void libretro_create_renderer()
 		}
 #endif
 	}
+	// A GPU thread parked at the gate for a renderer sleeps until told
+	Latte_NotifyRendererChanged();
 }
 
 // Runs on: the frontend's thread, inside retro_run or the load that precedes

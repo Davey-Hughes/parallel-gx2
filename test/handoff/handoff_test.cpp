@@ -4,11 +4,17 @@
 //    each pusher's order, wakes its consumer on a push (no poll - a lost wake
 //    hangs this test), refuses rather than grows when full, and lets a waiting
 //    consumer out on a stop;
-//  - the GPU thread's wake ends a wait as soon as the predicate is made true;
+//  - the GPU thread's wake ends a wait as soon as the predicate is made true,
+//    a bounded wait comes back by its deadline when it is not, and the boot's
+//    back-and-forth between the GPU thread and the CPU thread - several
+//    waiters, each with its own predicate, on the one wake - never loses one;
+//  - the thread-started flag the IOSU services start their threads with lets
+//    the starter go as soon as the thread says so, not on a clock;
 //  - the audio ring hands out whole frames in place, across the wrap, for 2 and
 //    6 channels, and streams intact between a producer and a consumer thread.
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompilerWorkQueue.h"
 #include "Cafe/HW/Latte/Core/LatteGpuWake.h"
+#include "util/helpers/ThreadStartedFlag.h"
 #include "libretro/LibretroAudioRing.h"
 
 #include <atomic>
@@ -180,6 +186,99 @@ static void TestGpuWake()
 	LatteGpuWake_WaitUntil([] { return true; });
 }
 
+static void TestGpuWakeDeadline()
+{
+	using clock = std::chrono::steady_clock;
+	// Never true: back by the deadline, saying so
+	{
+		const auto start = clock::now();
+		const bool r = LatteGpuWake_WaitUntil([] { return false; }, start + std::chrono::milliseconds(50));
+		CHECK(!r);
+		CHECK(clock::now() - start >= std::chrono::milliseconds(50));
+	}
+	// A deadline already gone: checks once and returns
+	CHECK(!LatteGpuWake_WaitUntil([] { return false; }, clock::now() - std::chrono::seconds(1)));
+	CHECK(LatteGpuWake_WaitUntil([] { return true; }, clock::now() - std::chrono::seconds(1)));
+	// Made true long before a far deadline: woken by the notify, not the
+	// deadline (the GX2Init wait's deadline is its next log line, seconds out)
+	{
+		std::atomic_bool ready{false};
+		const auto start = clock::now();
+		std::thread helper([&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20));
+			ready.store(true, std::memory_order_release);
+			LatteGpuWake_Notify();
+		});
+		const bool r = LatteGpuWake_WaitUntil([&] { return ready.load(std::memory_order_acquire); },
+			start + std::chrono::seconds(60));
+		helper.join();
+		CHECK(r);
+		CHECK(clock::now() - start < std::chrono::seconds(30));
+	}
+}
+
+// The boot as the core runs it with the GPU on a thread of its own: Latte_Start
+// waits for the thread's init, the thread waits for the title to start, the
+// title's init waits for the GPU's, the GPU waits for GX2Init - each a waiter
+// with a predicate of its own on the one wake, and each step notified once.
+static void TestGpuWakeBootHandoff()
+{
+	for (int round = 0; round < 1000; round++)
+	{
+		std::atomic_bool threadInit{false}, titleRunning{false}, gpuInitFinished{false}, gx2Init{false};
+		std::thread gpu([&] {
+			threadInit.store(true, std::memory_order_release);
+			LatteGpuWake_Notify();
+			LatteGpuWake_WaitUntil([&] { return titleRunning.load(std::memory_order_acquire); });
+			gpuInitFinished.store(true, std::memory_order_release);
+			LatteGpuWake_Notify();
+			LatteGpuWake_WaitUntil([&] { return gx2Init.load(std::memory_order_acquire); },
+				std::chrono::steady_clock::now() + std::chrono::seconds(5));
+		});
+		LatteGpuWake_WaitUntil([&] { return threadInit.load(std::memory_order_acquire); });
+		titleRunning.store(true, std::memory_order_release);
+		LatteGpuWake_Notify();
+		LatteGpuWake_WaitUntil([&] { return gpuInitFinished.load(std::memory_order_acquire); });
+		gx2Init.store(true, std::memory_order_release);
+		LatteGpuWake_Notify();
+		gpu.join(); // a lost wake hangs here, and the runner's timeout says so
+		CHECK(gpuInitFinished.load());
+	}
+}
+
+// --- thread-started flag ------------------------------------------------
+
+static void TestThreadStartedFlag()
+{
+	ThreadStartedFlag flag;
+	CHECK(!flag.IsSet());
+	// What the starter of a service does, again and again. With the 10 ms
+	// sleep it replaced this took 3 s at the very least; woken by the thread
+	// it is a few thread starts.
+	const auto start = std::chrono::steady_clock::now();
+	for (int round = 0; round < 300; round++)
+	{
+		std::atomic_bool stop{false};
+		flag.Reset();
+		std::thread service([&] {
+			flag.Set();
+			while (!stop.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			flag.Clear();
+		});
+		flag.Wait();
+		CHECK(flag.IsSet());
+		stop.store(true, std::memory_order_release);
+		service.join();
+		CHECK(!flag.IsSet());
+	}
+	CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(3));
+	// Set before the wait: returns without waiting
+	flag.Set();
+	flag.Wait();
+	CHECK(flag.IsSet());
+}
+
 // --- audio ring ---------------------------------------------------------
 
 static void TestAudioRingSpans(unsigned channels)
@@ -290,6 +389,9 @@ int main()
 	TestWorkQueueStream();
 	TestWorkQueueFullAndStop();
 	TestGpuWake();
+	TestGpuWakeDeadline();
+	TestGpuWakeBootHandoff();
+	TestThreadStartedFlag();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

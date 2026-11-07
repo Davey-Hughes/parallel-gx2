@@ -9,6 +9,8 @@
 #include "util/IniParser/IniParser.h"
 #include "Cafe/CafeSystem.h"
 #include "Cafe/HW/Latte/Core/LatteGpuCothread.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
+#include "Cafe/HW/Latte/Core/Latte.h"
 #include "HW/Espresso/Debugger/Debugger.h"
 #include "Cafe/HW/Latte/Core/LatteTiming.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
@@ -230,6 +232,7 @@ void GraphicPack2::ActivateForCurrentTitle()
 		}
 	}
 	s_isReady = true;
+	LatteGpuWake_Notify(); // WaitUntilReady
 }
 
 void GraphicPack2::Reset()
@@ -249,17 +252,20 @@ void GraphicPack2::ClearGraphicPacks()
 	s_active_graphic_packs.clear();
 }
 
+// Returns early on a stop: packs that are never going to be activated are not
+// worth waiting for, and the caller checks for the stop next.
 void GraphicPack2::WaitUntilReady()
 {
-	while (!s_isReady)
+	// A GPU on a cothread waits by handing the frontend's thread back: that
+	// thread is the one that activates the packs (LatteGpuCothread.h)
+	if (Latte_IsOnGpuCothread())
 	{
-		// A GPU on a cothread waits by handing the frontend's thread back: that
-		// thread is the one that activates the packs (LatteGpuCothread.h)
-		if (Latte_IsOnGpuCothread())
+		while (!s_isReady && !Latte_GetStopSignal())
 			Latte_GpuYield(LatteGpuYield::Idle);
-		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		return;
 	}
+	// Otherwise asleep until they are (ActivateForCurrentTitle notifies)
+	LatteGpuWake_WaitUntil([] { return s_isReady.load() || Latte_GetStopSignal(); });
 }
 
 std::unordered_map<std::string, GraphicPack2::PresetVar> GraphicPack2::ParsePresetVars(IniParser& rules) const

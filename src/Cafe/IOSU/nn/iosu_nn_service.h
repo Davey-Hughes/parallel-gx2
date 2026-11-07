@@ -3,6 +3,7 @@
 #include "Cafe/IOSU/iosu_ipc_common.h"
 #include "Cafe/IOSU/iosu_types_common.h"
 #include "Cafe/OS/libs/nn_common.h"
+#include "util/helpers/ThreadStartedFlag.h"
 
 namespace iosu
 {
@@ -61,7 +62,7 @@ namespace iosu
 			std::thread m_serviceThread;
 			std::atomic_bool m_requestStop{false};
 			std::atomic_bool m_isRunning{false};
-			std::atomic_bool m_threadInitialized{ false };
+			ThreadStartedFlag m_threadInitialized;
 			std::unordered_map<IOSDevHandle, void*> m_clientObjects;
 			IOSDevHandle m_nextHandle{1};
 			IOSTimerId m_timerId{IOSInvalidTimerId};
@@ -335,7 +336,7 @@ namespace iosu
 			std::thread m_serviceThread;
 			std::atomic_bool m_requestStop{false};
 			std::atomic_bool m_isRunning{false};
-			std::atomic_bool m_threadInitialized{ false };
+			ThreadStartedFlag m_threadInitialized;
 
 			IOSMsgQueueId m_msgQueueId;
 			SysAllocator<iosu::kernel::IOSMessage, 128> _m_msgBuffer;

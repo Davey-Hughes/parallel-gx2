@@ -23,6 +23,7 @@
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 #include "Cafe/Filesystem/FST/FST.h"
 #include "Common/FileStream.h"
 #include "GamePatch.h"
@@ -460,13 +461,15 @@ void cemu_initForGame()
 	// wait till GPU thread is initialized
 	// Under OpenGL the GPU is a cothread of this thread (LatteGpuCothread.h),
 	// and getting its init done is this thread running it.
-	while (g_isGPUInitFinished == false)
+	// Otherwise it is a thread of its own, and this sleeps until it says so
+	// (LatteGpuWake) - not up to 50 ms past it, checking by the clock.
+	if (Latte_IsGpuCothread())
 	{
-		if (Latte_IsGpuCothread())
+		while (g_isGPUInitFinished == false)
 			Latte_ServeGpu();
-		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	}
+	else
+		LatteGpuWake_WaitUntil([] { return g_isGPUInitFinished.load(); });
 	// run coreinit rpl_entry
 	RPLLoader_CallCoreinitEntrypoint();
 	// init AX and start AX I/O thread
@@ -1011,6 +1014,7 @@ namespace CafeSystem
 		PPCTimer_waitForInit();
 		// start system
 		sSystemRunning = true;
+		LatteGpuWake_Notify(); // the GPU thread, waiting for a title to start
 		WindowSystem::NotifyGameLoaded();
 		// On this thread, not a detached one. What that thread does is start the
 		// IOSU modules, scan the title for patches and bring the scheduler up -

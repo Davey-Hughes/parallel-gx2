@@ -13,10 +13,10 @@ namespace iosu
 		{
 			if (m_isRunning.exchange(true))
 				return;
-			m_threadInitialized = false;
+			m_threadInitialized.Reset();
 			m_requestStop = false;
 			m_serviceThread = std::thread(&IPCSimpleService::ServiceThread, this);
-			while (!m_threadInitialized) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			m_threadInitialized.Wait();
 			StartService();
 		}
 
@@ -41,7 +41,7 @@ namespace iosu
 			cemu_assert(!IOS_ResultIsError((IOS_ERROR)m_msgQueueId));
 			IOS_ERROR r = IOS_RegisterResourceManager(m_devicePath.c_str(), m_msgQueueId);
 			cemu_assert(!IOS_ResultIsError(r));
-			m_threadInitialized = true;
+			m_threadInitialized.Set();
 			while (true)
 			{
 				IOSMessage msg;
@@ -115,7 +115,7 @@ namespace iosu
 			// and this service can never be started again in this process.
 			IOS_UnregisterResourceManager(m_devicePath.c_str());
 			IOS_DestroyMessageQueue(m_msgQueueId);
-			m_threadInitialized = false;
+			m_threadInitialized.Clear();
 		}
 
 		void IPCSimpleService::SetTimerUpdate(uint32 milliseconds)
@@ -142,10 +142,10 @@ namespace iosu
 		{
 			if (m_isRunning.exchange(true))
 				return;
-			m_threadInitialized = false;
+			m_threadInitialized.Reset();
 			m_requestStop = false;
 			m_serviceThread = std::thread(&IPCService::ServiceThread, this);
-			while (!m_threadInitialized) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			m_threadInitialized.Wait();
 		}
 
 		void IPCService::Stop()
@@ -166,7 +166,7 @@ namespace iosu
 			cemu_assert(!IOS_ResultIsError((IOS_ERROR)m_msgQueueId));
 			IOS_ERROR r = IOS_RegisterResourceManager(m_devicePath.c_str(), m_msgQueueId);
 			cemu_assert(!IOS_ResultIsError(r));
-			m_threadInitialized = true;
+			m_threadInitialized.Set();
 			while (true)
 			{
 				IOSMessage msg;
@@ -244,7 +244,7 @@ namespace iosu
 			// and this service can never be started again in this process.
 			IOS_UnregisterResourceManager(m_devicePath.c_str());
 			IOS_DestroyMessageQueue(m_msgQueueId);
-			m_threadInitialized = false;
+			m_threadInitialized.Clear();
 		}
 	};
 };

@@ -3,6 +3,7 @@
 #include "config/ActiveSettings.h"
 #include "Common/FileStream.h"
 #include "util/helpers/Semaphore.h"
+#include "util/helpers/ThreadStartedFlag.h"
 #include "../kernel/iosu_kernel.h"
 
 namespace iosu
@@ -15,7 +16,7 @@ namespace iosu
 		std::thread s_serviceThread;
 		std::atomic_bool s_requestStop{false};
 		std::atomic_bool s_isRunning{false};
-		std::atomic_bool s_threadInitialized{ false };
+		ThreadStartedFlag s_threadInitialized;
 
 		IOSMsgQueueId s_msgQueueId;
 		SysAllocator<iosu::kernel::IOSMessage, 128> _s_msgBuffer;
@@ -85,7 +86,7 @@ namespace iosu
 			cemu_assert(!IOS_ResultIsError((IOS_ERROR)s_msgQueueId));
 			IOS_ERROR r = IOS_RegisterResourceManager(s_devicePath.c_str(), s_msgQueueId);
 			cemu_assert(!IOS_ResultIsError(r));
-			s_threadInitialized = true;
+			s_threadInitialized.Set();
 			while (true)
 			{
 				IOSMessage msg;
@@ -136,17 +137,17 @@ namespace iosu
 			// in the same process - see iosu_fsa.
 			IOS_UnregisterResourceManager(s_devicePath.c_str());
 			IOS_DestroyMessageQueue(s_msgQueueId);
-			s_threadInitialized = false;
+			s_threadInitialized.Clear();
 		}
 
 		void Initialize()
 		{
 			if (s_isRunning.exchange(true))
 				return;
-			s_threadInitialized = false;
+			s_threadInitialized.Reset();
 			s_requestStop = false;
 			s_serviceThread = std::thread(&ODMServiceThread);
-			while (!s_threadInitialized) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			s_threadInitialized.Wait();
 		}
 
 		void Shutdown()

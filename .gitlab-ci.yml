@@ -255,3 +255,14 @@ test-input-per-frame:
     GIT_SUBMODULE_STRATEGY: none
   script:
     - ./tools/check_input_per_frame.sh
+
+# The waits between loading a title and its first frame sleep until notified,
+# not by the clock.
+test-boot-waits:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - ./tools/check_boot_waits.sh

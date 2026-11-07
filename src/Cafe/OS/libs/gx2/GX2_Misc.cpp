@@ -6,6 +6,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #include "Cafe/HW/Latte/Core/LattePM4.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 #include "GX2_Command.h"
 #include "GX2_Event.h"
 #include "GX2_Misc.h"
@@ -159,6 +160,7 @@ namespace GX2
 		GX2::GX2MEMAllocatorsInit();
 		// let GPU know that GX2 is initialized
 		LatteGPUState.gx2InitCalled++;
+		LatteGpuWake_Notify(); // the GPU thread, waiting for exactly this
 		// run tests
 		_test_AddrLib();
 	}

@@ -210,6 +210,7 @@ bool Latte_GpuTeardownForContextLossDone();
 bool Latte_IsGpuThreadAlive(); // false once the thread has left, whatever took it out
 bool Latte_IsRendererRebuildPending();
 void Latte_AbandonRendererRebuild(); // the context is not coming back; let a parked thread go
+void Latte_NotifyRendererChanged(); // g_renderer holds the new renderer; wake the gate
 void Latte_GpuPauseGate(); // GPU thread only - called by the command processor
 const char* Latte_GetThreadPhase(); // where that thread was when it was asked to stop
 void Latte_JoinGpuThreadIfLeft(); // waits for a GPU thread that left on its own

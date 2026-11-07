@@ -18,8 +18,10 @@ C_SRCS := $(LRC)/queues/retro_spsc.c $(LRC)/rthreads/retro_eventcount.c $(LRC)/r
 CXX_SRCS := handoff_test.cpp \
 	$(SRC)/Cafe/HW/Espresso/Recompiler/PPCRecompilerWorkQueue.cpp \
 	$(SRC)/Cafe/HW/Latte/Core/LatteGpuWake.cpp
+HDRS := $(SRC)/libretro/LibretroAudioRing.h $(SRC)/Cafe/HW/Latte/Core/LatteGpuWake.h \
+	$(SRC)/util/helpers/ThreadStartedFlag.h
 
-handoff_test$(EXE): $(CXX_SRCS) $(C_SRCS) $(SRC)/libretro/LibretroAudioRing.h
+handoff_test$(EXE): $(CXX_SRCS) $(C_SRCS) $(HDRS)
 	$(CC) $(FLAGS) -std=gnu99 -c $(LRC)/queues/retro_spsc.c -o retro_spsc.o
 	$(CC) $(FLAGS) -std=gnu99 -c $(LRC)/rthreads/retro_eventcount.c -o retro_eventcount.o
 	$(CC) $(FLAGS) -std=gnu99 -c $(LRC)/rthreads/rthreads.c -o rthreads.o

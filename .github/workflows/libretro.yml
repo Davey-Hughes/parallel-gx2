@@ -84,6 +84,12 @@ jobs:
         # thread waking every millisecond to update them
         run: ./tools/check_input_per_frame.sh
 
+      - name: "Boot waits woken, not timed"
+        # the GPU thread's start, the title start, the graphic packs, the
+        # GPU's init, GX2Init and the IOSU services' threads sleep until
+        # notified, not by the clock; nor is the pause gate a mutex any more
+        run: ./tools/check_boot_waits.sh
+
       - name: "curl_compat against local servers"
         # plain, then under AddressSanitizer + UBSan, then ThreadSanitizer
         run: |

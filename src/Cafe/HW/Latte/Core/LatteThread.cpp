@@ -1,4 +1,3 @@
-#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include "Cafe/HW/Latte/Core/LatteGpuWake.h"
@@ -114,6 +113,13 @@ bool Latte_IsRendererRebuildPending()
 void Latte_AbandonRendererRebuild()
 {
 	sRendererRebuildPending.store(false, std::memory_order_release);
+	LatteGpuWake_Notify(); // the gate, which reads this as the stop it now is
+}
+
+// Runs on: the frontend's thread, once g_renderer holds the new renderer.
+void Latte_NotifyRendererChanged()
+{
+	LatteGpuWake_Notify(); // the gate, waiting for exactly this
 }
 
 // Where the GPU thread is. Only ever set by that thread, and only to string
@@ -152,8 +158,6 @@ static std::atomic_bool sGpuHandingContextBack{false};
 // context, no caches and no thread pools, and the teardown below must not
 // treat it as if it had.
 static std::atomic_bool sRendererStateInitialized{false};
-static std::mutex sGpuPauseMutex;
-static std::condition_variable sGpuPauseCv;
 
 
 void Latte_RequestGpuPause()
@@ -164,11 +168,8 @@ void Latte_RequestGpuPause()
 
 void Latte_ReleaseGpuPause()
 {
-	{
-		std::lock_guard<std::mutex> lock(sGpuPauseMutex);
-		sGpuPauseRequested.store(false, std::memory_order_release);
-	}
-	sGpuPauseCv.notify_all();
+	sGpuPauseRequested.store(false, std::memory_order_release);
+	LatteGpuWake_Notify(); // the gate
 }
 
 bool Latte_IsGpuParked()
@@ -244,9 +245,8 @@ void Latte_GpuPauseGate()
 		}
 		else
 		{
-			std::unique_lock<std::mutex> lock(sGpuPauseMutex);
 			sGpuParked.store(true, std::memory_order_release);
-			sGpuPauseCv.wait(lock, [] {
+			LatteGpuWake_WaitUntil([] {
 				return !sGpuPauseRequested.load(std::memory_order_acquire) || Latte_GetStopSignal();
 			});
 			sGpuParked.store(false, std::memory_order_release);
@@ -260,10 +260,16 @@ void Latte_GpuPauseGate()
 		// No renderer yet and no stop: the frontend has taken its context away
 		// and has not given one back. Nothing this thread does next is possible
 		// without one, so it waits here rather than out there.
+		// Woken by the renderer arriving (Latte_NotifyRendererChanged), by a
+		// stop, or by another pause - which the top of the loop waits out.
 		if (Latte_IsOnGpuCothread())
 			Latte_GpuYield(LatteGpuYield::Parked);
 		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			LatteGpuWake_WaitUntil([] {
+				return g_renderer != nullptr || Latte_GetStopSignal() ||
+					sGpuPauseRequested.load(std::memory_order_acquire) ||
+					!sRendererRebuildPending.load(std::memory_order_acquire);
+			});
 	}
 	sGpuAtPauseGate.store(false, std::memory_order_release);
 
@@ -381,6 +387,7 @@ int Latte_ThreadEntry()
 	Latte_InitRendererState();
 
 	sLatteThreadFinishedInit = true;
+	LatteGpuWake_Notify(); // Latte_Start
 
 	// register debug handler
 	if (cemuLog_isLoggingEnabled(LogType::OpenGLLogging))
@@ -399,7 +406,15 @@ int Latte_ThreadEntry()
 		if (Latte_IsOnGpuCothread())
 			Latte_GpuYield(LatteGpuYield::Idle);
 		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(1000/60));
+		{
+			// Asleep until the title starts (CafeSystem notifies) rather than
+			// checking every 16 ms - the empty frames above draw nothing on a
+			// libretro Vulkan renderer, so there is nothing to pace.
+			LatteGpuWake_WaitUntil([] { return CafeSystem::IsTitleRunning() || Latte_GetStopSignal(); });
+		}
+		// A title that is stopped before it ever ran: nothing to wait for.
+		if (Latte_GetStopSignal())
+			LatteThread_Exit();
 	}
 
 	g_renderer->DrawEmptyFrame(true);
@@ -409,6 +424,8 @@ int Latte_ThreadEntry()
 	if (Latte_GetStopSignal())
 		LatteThread_Exit();
 	GraphicPack2::WaitUntilReady();
+	if (Latte_GetStopSignal())
+		LatteThread_Exit();
 	// if legacy packs are enabled we cannot use the colorbuffer resolution optimization
 	LatteGPUState.allowFramebufferSizeOptimization = true;
 	for(auto& pack : GraphicPack2::GetActiveGraphicPacks())
@@ -437,6 +454,7 @@ int Latte_ThreadEntry()
 	Latte_LoadInitialRegisters();
 	// let CPU thread know the GPU is done initializing
 	g_isGPUInitFinished = true;
+	LatteGpuWake_Notify(); // CafeSystem's and the frontend's boot waits
 	// wait until CPU has called GX2Init()
 	// Same loop as upstream's, with the waiting said out loud: a title that
 	// never calls GX2Init looks exactly like a hung core from the outside, and
@@ -452,8 +470,17 @@ int Latte_ThreadEntry()
 				Latte_GpuYield(LatteGpuYield::Idle);
 			else
 			{
-				std::this_thread::yield();
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				// Asleep until there is something to do - GX2Init, an OSScreen
+				// flip to show (both notify), a stop - or until the next of the
+				// log lines below is due, rather than checking every 1 ms.
+				const auto nextLog = waitStart + std::chrono::seconds(loggedAfter < 5 ? 5 : loggedAfter < 30 ? 30 : 3600);
+				LatteGpuWake_WaitUntil([] {
+					return LatteGPUState.gx2InitCalled != 0 || Latte_GetStopSignal() ||
+						(LatteGPUState.osScreen.screen[0].isEnabled &&
+							LatteGPUState.osScreen.screen[0].flipExecuteCount != LatteGPUState.osScreen.screen[0].flipRequestCount) ||
+						(LatteGPUState.osScreen.screen[1].isEnabled &&
+							LatteGPUState.osScreen.screen[1].flipExecuteCount != LatteGPUState.osScreen.screen[1].flipRequestCount);
+				}, nextLog);
 			}
 			LatteThread_HandleOSScreen();
 			if (Latte_GetStopSignal())
@@ -647,11 +674,11 @@ void Latte_Start()
 		return;
 	}
 	sLatteThread = std::thread(Latte_ThreadEntry);
-	// wait until initialized
-	while (!sLatteThreadFinishedInit)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	}
+	// wait until initialized - or until the thread is gone without getting
+	// there, which would otherwise be a wait for good
+	LatteGpuWake_WaitUntil([] {
+		return sLatteThreadFinishedInit.load() || !sLatteThreadAlive.load(std::memory_order_acquire);
+	});
 }
 
 void Latte_Stop()
@@ -666,17 +693,13 @@ void Latte_Stop()
 	}
 	sLatteThreadRunning = false;
 	_lock.unlock();
-	LatteGpuWake_Notify();
 	// The one thing upstream's stop does not cover. A thread parked at the
-	// pause gate is asleep on a condition variable whose predicate does check
-	// the stop signal - but only when something wakes it, and nothing did. A
-	// frontend destroys the graphics context before it unloads, which is
-	// exactly when the gate is holding the GPU thread, so the stop that
-	// followed was never seen. Wake it, and the wait below is upstream's own.
-	{
-		std::lock_guard<std::mutex> lock(sGpuPauseMutex);
-	}
-	sGpuPauseCv.notify_all();
+	// pause gate, or anywhere else it waits on LatteGpuWake, does check the
+	// stop signal - but only when something wakes it. A frontend destroys the
+	// graphics context before it unloads, which is exactly when the gate is
+	// holding the GPU thread, so a stop nobody announced was never seen. Wake
+	// it, and the wait below is upstream's own.
+	LatteGpuWake_Notify();
 	if (LatteGpuCothread_Exists())
 	{
 		// The same wait, the cothread way: run it until it has seen the stop
@@ -761,6 +784,7 @@ void LatteThread_Exit()
 	// for a frontend to wait at the gate for, and a close that arrives while
 	// this runs should not spend its budget on one.
 	sLatteThreadAlive.store(false, std::memory_order_release);
+	LatteGpuWake_Notify(); // whoever is waiting for it to get somewhere
 	// The same teardown a lost context gets, and the only one there is. On a
 	// close the context took its contents back at the pause gate already and
 	// this finds nothing left to give; on a reset the context never went away

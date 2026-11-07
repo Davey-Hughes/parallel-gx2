@@ -1,6 +1,7 @@
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/gx2/GX2.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 
 #include "Cafe/OS/libs/coreinit/coreinit_OSScreen_font.h"
 #include "Cafe/OS/libs/coreinit/coreinit_OSScreen.h"
@@ -69,6 +70,7 @@ namespace coreinit
 	{
 		cemu_assert(screenIndex < 2);
 		LatteGPUState.osScreen.screen[screenIndex].isEnabled = isEnabled != 0;
+		LatteGpuWake_Notify(); // a flip may already be waiting to be shown
 	}
 
 	void OSScreenClearBufferEx(uint32 screenIndex, uint32 color)
@@ -81,6 +83,7 @@ namespace coreinit
 	{
 		cemu_assert(screenIndex < 2);
 		LatteGPUState.osScreen.screen[screenIndex].flipRequestCount++;
+		LatteGpuWake_Notify(); // the GPU thread shows it, before GX2Init
 		_updateCurrentDrawScreen(screenIndex);
 	}
 
