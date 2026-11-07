@@ -217,6 +217,23 @@ test-zarchive:
     - make -C test/zarchive clean
     - SANITIZER=address,undefined ./test/zarchive/run_tests.sh
 
+# The shader compiler, as the Vulkan renderer hands it GLSL: the core's own
+# shaders, the decompiler's shapes and every graphic pack shader it ships
+# (through spirv-val where the image has it).
+test-shaders:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: normal
+    GIT_SUBMODULE_PATHS: dependencies/cemu_graphic_packs
+    CC: gcc-12
+    CXX: g++-12
+  script:
+    - ./test/shaders/run_tests.sh
+    - make -C test/shaders clean
+    - SANITIZER=address,undefined ./test/shaders/run_tests.sh
+
 # No X11/XCB/Wayland/GL/EGL header, VK_USE_PLATFORM_* or platform surface
 # entry point in the core: the frontend owns the context and the surface.
 test-no-wsi:

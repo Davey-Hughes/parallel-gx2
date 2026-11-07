@@ -31,7 +31,6 @@
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
 #include <cstdint>
-#include <glslang/Public/ShaderLang.h>
 
 #ifndef VK_API_VERSION_MAJOR
 #define VK_API_VERSION_MAJOR(version) (((uint32_t)(version) >> 22) & 0x7FU)
@@ -280,7 +279,6 @@ bool libretro_gpu_context_gone();
 VulkanRenderer::VulkanRenderer(VkInstance instance, VkPhysicalDevice physDevice, VkDevice device, VkQueue queue, uint32_t queueFamilyIndex)
 	: Renderer(RendererAPI::Vulkan)
 {
-	glslang::InitializeProcess();
 	cemuLog_log(LogType::Force, "------- Init Vulkan graphics backend (libretro shared device) -------");
 
 	m_useExternalDevice = true;
@@ -695,9 +693,6 @@ VulkanRenderer::~VulkanRenderer()
 			vkDestroyInstance(m_instance, nullptr);
 		}
 	}
-
-	// crashes?
-	//glslang::FinalizeProcess();
 }
 
 // Default off: it trades colour precision for memory, so it is the user's call.

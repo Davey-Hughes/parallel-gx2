@@ -308,9 +308,11 @@ namespace LatteDecompiler
 		if (decompilerContext->options->spirvInstrinsics.hasRoundingModeRTEFloat32)
 		{
 			src->add("#extension GL_EXT_spirv_intrinsics: enable" _CRLF);
-			src->add("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, 16);" _CRLF);
+			// 32 bit only: the device's shaderRoundingModeRTEFloat32 is what is
+			// checked, the 16 and 64 bit modes would each need a feature of their
+			// own. glslang kept only the last mode a stage declared, so the 64 bit
+			// one, and never set it for 32 bit; rslc keeps every one.
 			src->add("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, 32);" _CRLF);
-			src->add("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, 64);" _CRLF);
 		}
 		src->add("#else" _CRLF);
 		// OpenGL defines

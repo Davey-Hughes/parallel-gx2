@@ -292,7 +292,6 @@ all: $(TARGET)
 
 -include $(DEPS)
 
-$(OBJECTS): | $(GEN_HEADERS)
 
 # The object list outgrows the 32 KiB Windows command line, so there the
 # linker reads it from a response file ($(file) needs GNU make 4.0, which

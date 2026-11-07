@@ -16,24 +16,8 @@ LRC_DIR := $(DEP_DIR)/libretro-common
 # ----------------------------------------------------------------------------
 # Generated files
 # ----------------------------------------------------------------------------
-GLSLANG_DIR     := $(DEP_DIR)/glslang
-GLSLANG_GEN_DIR := $(GEN_DIR)/glslang
 GRAPHIC_PACKS_C := $(GEN_DIR)/libretro_graphic_packs.cpp
 PACK_TOOL       := $(GEN_DIR)/pack_graphic_packs$(HOST_EXE)
-
-GEN_HEADERS := $(GLSLANG_GEN_DIR)/glslang/build_info.h $(GLSLANG_GEN_DIR)/glslang/SPIRV/GlslangToSpv.h
-
-# glslang's version, as its build_info.py takes it from CHANGES.md
-GLSLANG_VERSION := $(shell sed -n 's/^\#\# \([0-9]*\)\.\([0-9]*\)\.\([0-9]*\).*/\1 \2 \3/p' $(GLSLANG_DIR)/CHANGES.md | head -n 1)
-$(GLSLANG_GEN_DIR)/glslang/build_info.h: $(GLSLANG_DIR)/build_info.h.tmpl $(GLSLANG_DIR)/CHANGES.md
-	@mkdir -p $(@D)
-	sed -e 's/@major@/$(word 1,$(GLSLANG_VERSION))/' -e 's/@minor@/$(word 2,$(GLSLANG_VERSION))/' \
-		-e 's/@patch@/$(word 3,$(GLSLANG_VERSION))/' -e 's/@flavor@//' $< > $@
-
-# <glslang/SPIRV/...>, where an installed glslang has the SPIRV headers
-$(GLSLANG_GEN_DIR)/glslang/SPIRV/GlslangToSpv.h:
-	@mkdir -p $(@D)
-	echo '#include "$(abspath $(GLSLANG_DIR)/SPIRV/GlslangToSpv.h)"' > $@
 
 # The community graphic packs, compiled in (src/libretro/LibretroGraphicPacks.cpp)
 GRAPHIC_PACKS_DIR := $(DEP_DIR)/cemu_graphic_packs
@@ -501,7 +485,7 @@ CORE_FLAGS := -DENABLE_LIBRETRO -DRETRO_CORE -DVK_NO_PROTOTYPES \
 	-I$(DEP_DIR)/Vulkan-Headers/include \
 	-I$(DEP_DIR)/imgui -I$(DEP_DIR)/glm -I$(DEP_DIR)/fmt/include \
 	-I$(DEP_DIR)/pugixml/src -I$(DEP_DIR)/zlib -I$(DEP_DIR)/zstd/lib \
-	-I$(GLSLANG_DIR) -I$(GLSLANG_GEN_DIR) -I$(DEP_DIR)/boost-compat \
+	-I$(DEP_DIR)/boost-compat \
 	-I$(DEP_DIR)/curl-compat/include -I$(DEP_DIR)/libusb-config \
 	-I$(LRC_DIR)/include
 CORE_WARNFLAGS := -Wno-multichar -Wno-invalid-offsetof -Wno-switch -Wno-ignored-attributes \
@@ -543,7 +527,7 @@ ifneq ($(NO_PCH),1)
    $(CORE_PCH_STUB):
 	@mkdir -p $(@D)
 	echo '#include "$(CORE_PCH_HEADER)"' > $@
-   $(CORE_PCH): $(CORE_PCH_STUB) $(OBJ_DIR)/pch/flags $(SRC_DIR)/Common/precompiled.h | $(GEN_HEADERS)
+   $(CORE_PCH): $(CORE_PCH_STUB) $(OBJ_DIR)/pch/flags $(SRC_DIR)/Common/precompiled.h
 	@$(if $(E),echo PCH $<,)
 	$(CXX) $(CORE_PCH_FLAGS) -MMD -MP -MF $(CORE_PCH_STUB).d -MT $@ -x c++-header -c $< -o $@
    CORE_PCH_INCLUDE := $(abspath $(CORE_PCH_STUB))
@@ -577,6 +561,9 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/file/retro_dirent.c \
 	$(LRC_DIR)/formats/zar/zar.c \
 	$(LRC_DIR)/formats/zar/zar_write.c \
+	$(LRC_DIR)/gfx/shaders/rslc_dxbc.c \
+	$(LRC_DIR)/gfx/shaders/rslc_front.c \
+	$(LRC_DIR)/gfx/shaders/rslc_ir.c \
 	$(LRC_DIR)/hash/lrc_hash.c \
 	$(LRC_DIR)/lists/string_list.c \
 	$(LRC_DIR)/net/net_compat.c \
@@ -592,7 +579,10 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/time/rtime.c \
 	$(LRC_DIR)/utils/md5.c \
 	$(LRC_DIR)/vfs/vfs_implementation.c
-LRC_FLAGS := -I$(LRC_DIR)/include -DHAVE_SSL -DHAVE_RETROSSL -DHAVE_CRYPTO -DHAVE_THREADS -DHAVE_RZSTD
+# rslc: the shader compiler, SPIR-V alone (RSLC_NO_TEXT), with the samplers
+# and stages the console's shaders use (RSLC_EXTENDED)
+LRC_FLAGS := -I$(LRC_DIR)/include -DHAVE_SSL -DHAVE_RETROSSL -DHAVE_CRYPTO -DHAVE_THREADS -DHAVE_RZSTD \
+	-DRSLC_EXTENDED -DRSLC_NO_TEXT
 # libco: Android's fibers (FiberAndroid.cpp), and the OpenGL GPU, which runs as
 # a cothread of the frontend's thread because the frontend's context is current
 # there and nowhere else (LatteThread.cpp). Per-thread state (LIBCO_MP): more
@@ -636,16 +626,6 @@ IH264D_ASFLAGS := -I$(IH264D_DIR)/common/armv8
 IMGUI_SOURCES_CXX := $(addprefix $(DEP_DIR)/imgui/,imgui.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp)
 IMGUI_FLAGS := -I$(DEP_DIR)/imgui -w
 
-GLSLANG_SOURCES_CXX := $(addprefix $(GLSLANG_DIR)/, \
-	glslang/GenericCodeGen/CodeGen.cpp glslang/GenericCodeGen/Link.cpp glslang/MachineIndependent/glslang_tab.cpp glslang/MachineIndependent/attribute.cpp glslang/MachineIndependent/Constant.cpp glslang/MachineIndependent/iomapper.cpp glslang/MachineIndependent/InfoSink.cpp glslang/MachineIndependent/Initialize.cpp glslang/MachineIndependent/IntermTraverse.cpp glslang/MachineIndependent/Intermediate.cpp glslang/MachineIndependent/ParseContextBase.cpp glslang/MachineIndependent/ParseHelper.cpp glslang/MachineIndependent/PoolAlloc.cpp glslang/MachineIndependent/RemoveTree.cpp glslang/MachineIndependent/Scan.cpp glslang/MachineIndependent/ShaderLang.cpp glslang/MachineIndependent/SpirvIntrinsics.cpp glslang/MachineIndependent/SymbolTable.cpp glslang/MachineIndependent/Versions.cpp glslang/MachineIndependent/intermOut.cpp glslang/MachineIndependent/limits.cpp glslang/MachineIndependent/linkValidate.cpp glslang/MachineIndependent/parseConst.cpp glslang/MachineIndependent/reflection.cpp glslang/MachineIndependent/preprocessor/Pp.cpp glslang/MachineIndependent/preprocessor/PpAtom.cpp glslang/MachineIndependent/preprocessor/PpContext.cpp glslang/MachineIndependent/preprocessor/PpScanner.cpp glslang/MachineIndependent/preprocessor/PpTokens.cpp glslang/MachineIndependent/propagateNoContraction.cpp glslang/ResourceLimits/ResourceLimits.cpp SPIRV/GlslangToSpv.cpp SPIRV/InReadableOrder.cpp SPIRV/Logger.cpp SPIRV/SpvBuilder.cpp SPIRV/SpvPostProcess.cpp SPIRV/doc.cpp SPIRV/SpvTools.cpp SPIRV/disassemble.cpp)
-ifeq ($(OS_WIN),1)
-   GLSLANG_SOURCES_CXX += $(GLSLANG_DIR)/glslang/OSDependent/Windows/ossource.cpp
-   GLSLANG_FLAGS := -DGLSLANG_OSINCLUDE_WIN32
-else
-   GLSLANG_SOURCES_CXX += $(GLSLANG_DIR)/glslang/OSDependent/Unix/ossource.cpp
-   GLSLANG_FLAGS := -DGLSLANG_OSINCLUDE_UNIX
-endif
-GLSLANG_FLAGS += -DENABLE_SPIRV -DENABLE_OPT=0 -I$(GLSLANG_DIR) -I$(GLSLANG_GEN_DIR) -w
 
 # fmt is header-only except on Android (precompiled.h): format.cc there only,
 # as its definitions and the inline ones every other TU has would clash where
@@ -699,7 +679,7 @@ LIBUSB_FLAGS := -I$(DEP_DIR)/libusb-config -I$(LIBUSB_DIR) -w
 XBYAK_SOURCES_CXX := $(DEP_DIR)/xbyak_aarch64/src/xbyak_aarch64_impl.cpp $(DEP_DIR)/xbyak_aarch64/src/util_impl.cpp
 XBYAK_FLAGS := -I$(DEP_DIR)/xbyak_aarch64 -I$(DEP_DIR)/xbyak_aarch64/xbyak_aarch64 -w
 
-LIB_GROUPS := CORE CURLCOMPAT LRC IH264D IMGUI GLSLANG FMT PUGIXML ZLIB ZSTD
+LIB_GROUPS := CORE CURLCOMPAT LRC IH264D IMGUI FMT PUGIXML ZLIB ZSTD
 ifeq ($(HAVE_LIBUSB),1)
    LIB_GROUPS += LIBUSB
 endif

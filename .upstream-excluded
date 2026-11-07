@@ -55,3 +55,4 @@ src/Cafe/HW/Latte/Renderer/Vulkan/SwapchainInfoVk.h
 src/Cafe/HW/Latte/Renderer/Vulkan/CocoaSurface.mm
 src/Cafe/HW/Latte/Renderer/Vulkan/CocoaSurface.h
 dependencies/ZArchive
+dependencies/glslang
