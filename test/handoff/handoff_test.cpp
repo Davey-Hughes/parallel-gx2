@@ -42,6 +42,11 @@
 //    lose none and keep none they dropped, and an owner's destruction hands
 //    each remaining one over once, even as their destructors remove them
 //    from it and from the other bags;
+//  - MpscQueue and MpmcQueue (the GX2 event, thread deallocator, curl and
+//    pipeline cache writer queues; the two pipeline compile pools): every
+//    item taken exactly once, each producer's in order where promised, a pop
+//    asleep until there is something, and the MPMC overflow past its ring
+//    handed back to sleeping consumers;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -60,6 +65,8 @@
 #include "audio/AudioDevicesGate.h"
 #include "util/helpers/AtomicPageSet.h"
 #include "util/helpers/AtomicPtrBag.h"
+#include "util/helpers/MpscQueue.h"
+#include "util/helpers/MpmcQueue.h"
 #include "Cafe/HW/Espresso/PPCTimerClock.h"
 #include <set>
 #include "libretro.h"
@@ -937,6 +944,108 @@ static void TestAtomicPtrBag()
 	}
 }
 
+// --- worker queues ----------------------------------------------------------
+
+static void TestMpscQueue()
+{
+	MpscQueue<std::pair<int, int>> queue;
+	constexpr int kProducers = 4, kItems = 20000;
+	std::vector<std::thread> producers;
+	for (int p = 0; p < kProducers; p++)
+		producers.emplace_back([&, p] {
+			for (int i = 0; i < kItems; i++)
+			{
+				queue.push({p, i});
+				if (i % 1000 == 0)
+					std::this_thread::sleep_for(std::chrono::microseconds(100)); // let the consumer catch up and sleep
+			}
+		});
+	int next[kProducers] = {};
+	bool ordered = true;
+	for (int n = 0; n < kProducers * kItems; n++)
+	{
+		const auto item = queue.pop(); // asleep whenever it catches up
+		ordered = ordered && item.second == next[item.first];
+		next[item.first] = item.second + 1;
+	}
+	for (auto& t : producers)
+		t.join();
+	std::pair<int, int> extra;
+	CHECK(ordered);
+	CHECK(!queue.peek2(extra));
+	CHECK(queue.empty());
+}
+
+static void TestMpmcQueue()
+{
+	// Several consumers, items pushed both while they keep up and in bursts
+	// past the ring, so the overflow is handed back to them
+	MpmcQueue<int> queue;
+	constexpr int kConsumers = 4, kItems = 200000;
+	std::vector<std::atomic<uint8_t>> seen(kItems);
+	std::atomic<int> taken{0};
+	std::vector<std::thread> consumers;
+	for (int c = 0; c < kConsumers; c++)
+		consumers.emplace_back([&] {
+			for (;;)
+			{
+				const int v = queue.pop();
+				if (v < 0)
+					return; // one stop item per consumer
+				if (seen[v].fetch_add(1) != 0)
+					taken.store(-1000000); // taken twice
+				taken.fetch_add(1);
+			}
+		});
+	std::thread producer2([&] {
+		for (int i = 1; i < kItems; i += 2)
+			queue.push(i);
+	});
+	for (int i = 0; i < kItems; i += 2)
+	{
+		queue.push(i);
+		if (i % 20000 == 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	producer2.join();
+	while (taken.load() >= 0 && taken.load() < kItems)
+		std::this_thread::yield();
+	for (int c = 0; c < kConsumers; c++)
+		queue.push(-1);
+	for (auto& t : consumers)
+		t.join();
+	CHECK(taken.load() == kItems);
+	bool once = true;
+	for (auto& s : seen)
+		once = once && s.load() == 1;
+	CHECK(once);
+	// In order while it fits the ring, one consumer
+	MpmcQueue<int> ordered;
+	for (int i = 0; i < 1000; i++)
+		ordered.push(i);
+	bool inOrder = true;
+	for (int i = 0; i < 1000; i++)
+		inOrder = inOrder && ordered.pop() == i;
+	CHECK(inOrder);
+	// Past the ring with nobody taking: all still there
+	MpmcQueue<int> burst;
+	for (int i = 0; i < 5000; i++)
+		burst.push(i);
+	CHECK(burst.size() == 5000);
+	std::vector<uint8_t> got(5000);
+	int v, n = 0;
+	while (burst.peek2(v))
+	{
+		got[v]++;
+		n++;
+	}
+	CHECK(n == 5000);
+	bool all = true;
+	for (auto g : got)
+		all = all && g == 1;
+	CHECK(all);
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -1155,6 +1264,8 @@ int main()
 	TestAtomicPageSet();
 	TestPPCTimerClock();
 	TestAtomicPtrBag();
+	TestMpscQueue();
+	TestMpmcQueue();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

@@ -8,7 +8,7 @@
 #include "GX2.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "config/ActiveSettings.h"
-#include "util/helpers/ConcurrentQueue.h"
+#include "util/helpers/MpscQueue.h"
 
 namespace GX2
 {
@@ -155,7 +155,8 @@ namespace GX2
 	};
 
 	SysAllocator<coreinit::OSSemaphore> s_eventCbQueueSemaphore;
-	ConcurrentQueue<GX2EventQueueEntry> s_eventCbQueue;
+	// pushed from the GPU thread, taken by the one callback thread: no lock
+	MpscQueue<GX2EventQueueEntry> s_eventCbQueue;
 
 	void __GX2NotifyEvent(GX2CallbackEventType eventType)
 	{

@@ -11,7 +11,7 @@
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 
 #include "util/helpers/Semaphore.h"
-#include "util/helpers/ConcurrentQueue.h"
+#include "util/helpers/MpscQueue.h"
 #include "util/Fiber/Fiber.h"
 
 #include "util/helpers/helpers.h"
@@ -1961,7 +1961,7 @@ namespace coreinit
 		SysAllocator<uint8, 16 * 1024> threadStack;
 		SysAllocator<char, 64> threadName;
 		SysAllocator<OSSemaphore> semaphoreQueuedDeallocators;
-		ConcurrentQueue<DeallocatorQueueEntry> queueDeallocators;
+		MpscQueue<DeallocatorQueueEntry> queueDeallocators; // one terminator thread takes them: no lock
 	};
 
 	TerminatorThread s_terminatorThreads[PPC_CORE_COUNT];

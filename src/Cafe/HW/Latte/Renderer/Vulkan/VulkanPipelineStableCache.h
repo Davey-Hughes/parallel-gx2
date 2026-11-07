@@ -1,5 +1,7 @@
 #pragma once
 #include "util/helpers/MpscList.h"
+#include "util/helpers/MpscQueue.h"
+#include "util/helpers/MpmcQueue.h"
 
 struct VulkanPipelineHash
 {
@@ -75,6 +77,6 @@ private:
 	class FileCache* s_cache;
 
 	std::atomic_uint32_t m_numCompilationThreads{ 0 };
-	ConcurrentQueue<std::vector<uint8>> m_compilationQueue;
+	MpmcQueue<std::vector<uint8>> m_compilationQueue; // the loader to every compiler thread: no lock
 	std::atomic_uint32_t m_compilationCount;
 };

@@ -13,7 +13,7 @@
 #include "Cafe/OS/libs/nsysnet/nsysnet.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
 
-#include "util/helpers/ConcurrentQueue.h"
+#include "util/helpers/MpscQueue.h"
 #include "Cafe/OS/common/PPCConcurrentQueue.h"
 #include "Common/FileStream.h"
 #include "config/ActiveSettings.h"
@@ -286,8 +286,8 @@ static_assert(sizeof(CURLMsg_t) <= 0xC, "sizeof(CURLMsg_t)");
 size_t header_callback(char* buffer, size_t size, size_t nitems, void* userdata);
 
 thread_local PPCConcurrentQueue<QueueMsg_t>* g_callerQueue;
-thread_local ConcurrentQueue<QueueMsg_t>* g_threadQueue;
-void CurlWorkerThread(CURL_t* curl, PPCConcurrentQueue<QueueMsg_t>* callerQueue, ConcurrentQueue<QueueMsg_t>* threadQueue)
+thread_local MpscQueue<QueueMsg_t>* g_threadQueue;
+void CurlWorkerThread(CURL_t* curl, PPCConcurrentQueue<QueueMsg_t>* callerQueue, MpscQueue<QueueMsg_t>* threadQueue)
 {
 	g_callerQueue = callerQueue;
 	g_threadQueue = threadQueue;
@@ -315,7 +315,7 @@ uint32 SendOrderToWorker(CURL_t* curl, QueueOrder order, uint32 arg1 = 0)
 	// cemuLog_logDebug(LogType::Force, "CURRENTTHREAD: 0x{} -> {}",currentThread, order)
 
 	PPCConcurrentQueue<QueueMsg_t> callerQueue;
-	ConcurrentQueue<QueueMsg_t> threadQueue;
+	MpscQueue<QueueMsg_t> threadQueue; // the one worker thread takes from it
 	std::thread worker(CurlWorkerThread, curl, &callerQueue, &threadQueue);
 	worker.detach();
 

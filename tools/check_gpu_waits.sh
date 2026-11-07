@@ -31,7 +31,10 @@
 # each dcbf/dcbst (AtomicPageSet.h); the Vulkan renderer's destruction queue
 # and the pipelines each shader and framebuffer is used by, which the pipeline
 # cache's compile threads all register at once while a title loads
-# (AtomicPtrBag.h).
+# (AtomicPtrBag.h); and the worker queues - GX2's event callbacks, the
+# thread deallocators, curl's workers, the pipeline cache writer (MpscQueue.h)
+# and the two pipeline compile pools (MpmcQueue.h) - instead of
+# ConcurrentQueue's mutex and condition variable.
 #
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
@@ -123,9 +126,17 @@ for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
 	src/Cafe/HW/Latte/Core/LatteBufferCache.cpp src/util/helpers/AtomicPageSet.h \
 	src/Cafe/HW/Latte/Renderer/Vulkan/CachedFBOVk.h src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.h \
 	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.cpp \
-	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h src/util/helpers/AtomicPtrBag.h; do
+	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h src/util/helpers/AtomicPtrBag.h \
+	src/util/helpers/MpscQueue.h src/util/helpers/MpmcQueue.h; do
 	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for|FSpinlock'; then
 		echo "$f: takes a lock or sleeps again"; fail=1
+	fi
+done
+for f in src/Cafe/OS/libs/gx2/GX2_Event.cpp src/Cafe/OS/libs/coreinit/coreinit_Thread.cpp \
+	src/Cafe/OS/libs/nlibcurl/nlibcurl.cpp src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineCompiler.cpp \
+	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.cpp src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h; do
+	if pp $f | grep -qE '(^|[^C])ConcurrentQueue<'; then
+		echo "$f: a worker queue is back on ConcurrentQueue's mutex"; fail=1
 	fi
 done
 # VulkanRenderer still has a reader-writer lock around vkCreateGraphicsPipelines

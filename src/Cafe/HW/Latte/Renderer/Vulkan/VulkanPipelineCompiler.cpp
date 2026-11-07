@@ -1098,7 +1098,8 @@ bool PipelineCompiler::CalcRobustBufferAccessRequirement(LatteDecompilerShader* 
 
 static std::vector<std::thread> s_compileThreads;
 static std::atomic_bool s_compileThreadsShutdownSignal{};
-static ConcurrentQueue<PipelineCompiler*> s_pipelineCompileRequests;
+// pushed by the GPU thread, taken by every compile thread: no lock
+static MpmcQueue<PipelineCompiler*> s_pipelineCompileRequests;
 
 static void compilePipeline_thread(sint32 threadIndex)
 {

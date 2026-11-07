@@ -144,7 +144,7 @@ void VulkanPipelineStableCache::EndLoading()
 
 // Defined below, with the writer thread that reads it.
 struct CachedPipeline;
-extern ConcurrentQueue<CachedPipeline*> g_pipelineCachingQueue;
+extern MpscQueue<CachedPipeline*> g_pipelineCachingQueue;
 
 void VulkanPipelineStableCache::Close()
 {
@@ -398,7 +398,8 @@ bool VulkanPipelineStableCache::HasPipelineCached(uint64 baseHash, uint64 pipeli
 	return m_pipelineIsCached.find(ph) != m_pipelineIsCached.end();
 }
 
-ConcurrentQueue<CachedPipeline*> g_pipelineCachingQueue;
+// pushed by the GPU thread and Close, taken by the one writer thread: no lock
+MpscQueue<CachedPipeline*> g_pipelineCachingQueue;
 
 void VulkanPipelineStableCache::AddCurrentStateToCache(uint64 baseHash, uint64 pipelineStateHash)
 {
