@@ -1,25 +1,28 @@
 #include "Cafe/HW/Espresso/Const.h"
 #include "config/ActiveSettings.h"
-#include "util/helpers/fspinlock.h"
+#include "util/helpers/SeqlockValue.h"
+#include "Cafe/HW/Espresso/PPCTimerClock.h"
 #include "util/highresolutiontimer/HighResolutionTimer.h"
 #include "Common/cpu_features.h"
 
 #include <atomic>
 #include <thread>
-#include <rthreads/retro_eventcount.h>
+#include "util/helpers/EventWake.h"
 
 #if defined(ARCH_X86_64)
 #include <immintrin.h>
 #pragma intrinsic(__rdtsc)
 #endif
 
-uint64 _rdtscLastMeasure = 0;
 // Published by the calibration thread, first after 25 ms and then twice more
-// as it gets better (PPCTimer_initThread); read under sTimerSpinlock
+// as it gets better (PPCTimer_initThread); taken up by the next guest time
+// read (PPCTimerClock.h)
 static std::atomic<uint64> _rdtscFrequency{0};
 // The title start waits on this for the first estimate (PPCTimer_waitForInit)
-static retro_eventcount_t sTimerReady{};
-static bool sTimerReadyOk = false;
+// (never destroyed: the calibration thread is detached and may notify at exit)
+static ImmortalEventWake sTimerReady;
+static PPCTimerClock sGuestClock;
+static_assert(PPCTimerClock::kConsoleClock == Espresso::CORE_CLOCK);
 
 struct uint128_t
 {
@@ -28,8 +31,6 @@ struct uint128_t
 };
 
 static_assert(sizeof(uint128_t) == 16);
-
-uint128_t _rdtscAcc{};
 
 uint64 muldiv64(uint64 a, uint64 b, uint64 d)
 {
@@ -76,27 +77,21 @@ int PPCTimer_initThread()
 		if (tscFreq == 0)
 			continue;
 		_rdtscFrequency.store(tscFreq, std::memory_order_release);
-		if (sTimerReadyOk)
-			retro_eventcount_notify(&sTimerReady);
+		sTimerReady->Notify();
 	}
 	return 0;
 }
 
 void PPCTimer_init()
 {
-	if (!sTimerReadyOk)
-		sTimerReadyOk = retro_eventcount_init(&sTimerReady);
 	std::thread t(PPCTimer_initThread);
 	t.detach();
-	_rdtscLastMeasure = __rdtsc();
+	sGuestClock.Restart(__rdtsc());
 }
-
-uint64 _tickSummary = 0;
 
 void PPCTimer_start()
 {
-	_rdtscLastMeasure = __rdtsc();
-	_tickSummary = 0;
+	sGuestClock.Restart(__rdtsc());
 }
 
 uint64 PPCTimer_getRawTsc()
@@ -128,64 +123,15 @@ bool PPCTimer_isReady()
 void PPCTimer_waitForInit()
 {
 	// Asleep until the first estimate, 25 ms after PPCTimer_init at most
-	while (!PPCTimer_isReady())
-	{
-		if (!sTimerReadyOk)
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-			continue;
-		}
-		const int key = retro_eventcount_prepare_wait(&sTimerReady);
-		if (PPCTimer_isReady())
-		{
-			retro_eventcount_cancel_wait(&sTimerReady);
-			break;
-		}
-		retro_eventcount_commit_wait(&sTimerReady, key);
-	}
+	sTimerReady->WaitUntil([] { return PPCTimer_isReady(); });
 }
 
-FSpinlock sTimerSpinlock;
-
-// thread safe
+// thread safe, and without a lock: every guest time read on every core comes
+// here (OSGetTime, the scheduler's alarms, mftb), and it was a spinlock all of
+// them took (PPCTimerClock.h)
 uint64 PPCTimer_getFromRDTSC()
 {
-	sTimerSpinlock.lock();
 	_mm_mfence();
-	uint64 rdtscCurrentMeasure = __rdtsc();
-	uint64 rdtscDif = rdtscCurrentMeasure - _rdtscLastMeasure;
-	// optimized max(rdtscDif, 0) without conditionals
-	rdtscDif = rdtscDif & ~(uint64)((sint64)rdtscDif >> 63);
-
-	uint128_t diff{};
-	diff.low = _umul128(rdtscDif, Espresso::CORE_CLOCK, &diff.high);
-
-	if(rdtscCurrentMeasure > _rdtscLastMeasure)
-		_rdtscLastMeasure = rdtscCurrentMeasure; // only travel forward in time
-
-	uint8 c = 0;
-	#if BOOST_OS_WINDOWS
-	c = _addcarry_u64(c, _rdtscAcc.low, diff.low, &_rdtscAcc.low);
-	_addcarry_u64(c, _rdtscAcc.high, diff.high, &_rdtscAcc.high);
-	#else
-	// requires casting because of long / long long nonesense
-	c = _addcarry_u64(c, _rdtscAcc.low, diff.low, (unsigned long long*)&_rdtscAcc.low);
-	_addcarry_u64(c, _rdtscAcc.high, diff.high, (unsigned long long*)&_rdtscAcc.high);
-	#endif
-
-	uint64 remainder;
-	uint64 elapsedTick = _udiv128(_rdtscAcc.high, _rdtscAcc.low, _rdtscFrequency.load(std::memory_order_relaxed), &remainder);
-
-	_rdtscAcc.low = remainder;
-	_rdtscAcc.high = 0;
-
-	// timer scaling
-	elapsedTick <<= 3ull; // *8
-	uint8 timerShiftFactor = ActiveSettings::GetTimerShiftFactor();
-	elapsedTick >>= timerShiftFactor;
-
-	_tickSummary += elapsedTick;
-
-	sTimerSpinlock.unlock();
-	return _tickSummary;
+	const uint64 tsc = __rdtsc();
+	return sGuestClock.Read(tsc, _rdtscFrequency.load(std::memory_order_acquire), ActiveSettings::GetTimerShiftFactor());
 }

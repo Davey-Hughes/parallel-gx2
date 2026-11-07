@@ -1,7 +1,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "util/ChunkedHeap/ChunkedHeap.h"
-#include "util/helpers/fspinlock.h"
 #include "config/ActiveSettings.h"
+#include "util/helpers/AtomicPageSet.h"
 
 #define CACHE_PAGE_SIZE		0x400
 #define CACHE_PAGE_SIZE_M1	(CACHE_PAGE_SIZE-1)
@@ -1649,89 +1649,30 @@ void LatteBufferCache_getStats(uint32& heapSize, uint32& allocationSize, uint32&
 	g_gpuBufferHeap->getStats(heapSize, allocationSize, allocNum);
 }
 
-class SparseBitset
-{
-	static inline constexpr size_t TABLE_MASK = 0xFF;
-
-public:
-	bool Empty() const
-	{
-		return m_numNonEmptyVectors == 0;
-	}
-
-	void Set(uint32 index)
-	{
-		auto& v = m_bits[index & TABLE_MASK];
-		if (std::find(v.cbegin(), v.cend(), index) != v.end())
-			return;
-		if (v.empty())
-		{
-			m_nonEmptyVectors[m_numNonEmptyVectors] = &v;
-			m_numNonEmptyVectors++;
-		}
-		v.emplace_back(index);
-	}
-
-	template<typename TFunc>
-	void ForAllAndClear(TFunc callbackFunc)
-	{
-		auto vCurrent = m_nonEmptyVectors + 0;
-		auto vEnd = m_nonEmptyVectors + m_numNonEmptyVectors;
-		while (vCurrent < vEnd)
-		{
-			std::vector<uint32>* vec = *vCurrent;
-			vCurrent++;
-			for (const auto& it : *vec)
-				callbackFunc(it);
-			vec->clear();
-		}
-		m_numNonEmptyVectors = 0;
-	}
-
-	void Clear()
-	{
-		auto vCurrent = m_nonEmptyVectors + 0;
-		auto vEnd = m_nonEmptyVectors + m_numNonEmptyVectors;
-		while (vCurrent < vEnd)
-		{
-			std::vector<uint32>* vec = *vCurrent;
-			vCurrent++;
-			vec->clear();
-		}
-		m_numNonEmptyVectors = 0;
-	}
-
-private:
-	std::vector<uint32> m_bits[TABLE_MASK + 1];
-	std::vector<uint32>* m_nonEmptyVectors[TABLE_MASK + 1];
-	size_t m_numNonEmptyVectors{ 0 };
-};
-
-FSpinlock g_spinlockDCFlushQueue;
-SparseBitset* s_DCFlushQueue = new SparseBitset();
-SparseBitset* s_DCFlushQueueAlternate = new SparseBitset();
+// The pages the emulated CPU has flushed from its data cache since the GPU
+// last looked, for the GPU to drop from its buffer cache. Added to from every
+// CPU thread - on every dcbf/dcbst the interpreter runs, among others - and
+// drained by the GPU thread, without a lock: it was a spinlock both sides took,
+// and a CPU thread preempted while holding it left the others and the GPU
+// spinning. A page already in costs three loads (AtomicPageSet.h).
+static AtomicPageSet<0x100000000ull / CACHE_PAGE_SIZE> s_DCFlushQueue;
 
 void LatteBufferCache_notifyDCFlush(MPTR address, uint32 size)
 {
 	if (address == 0 || size == 0xFFFFFFFF)
 		return; // global flushes are ignored for now
 
-	uint32 firstPage = address / CACHE_PAGE_SIZE;
-	uint32 lastPage = (address + size - 1) / CACHE_PAGE_SIZE;
-	g_spinlockDCFlushQueue.lock();
-	for (uint32 i = firstPage; i <= lastPage; i++)
-		s_DCFlushQueue->Set(i);
-	g_spinlockDCFlushQueue.unlock();
+	const uint64 end = (uint64)address + size - 1;
+	const uint32 firstPage = address / CACHE_PAGE_SIZE;
+	const uint32 lastPage = (uint32)(std::min<uint64>(end, 0xFFFFFFFFull) / CACHE_PAGE_SIZE);
+	s_DCFlushQueue.Add(firstPage, lastPage);
 }
 
 void LatteBufferCache_processDCFlushQueue()
 {
-	if (s_DCFlushQueue->Empty()) // quick check to avoid locking if there is no work to do
+	if (s_DCFlushQueue.MaybeEmpty()) // quick check: nothing flushed since last time
 		return;
-	g_spinlockDCFlushQueue.lock();
-	std::swap(s_DCFlushQueue, s_DCFlushQueueAlternate);
-	g_spinlockDCFlushQueue.unlock();
-	s_DCFlushQueueAlternate->ForAllAndClear([](uint32 index) {LatteBufferCache_invalidatePage(index * CACHE_PAGE_SIZE); });
+	s_DCFlushQueue.Drain([](uint32 index) { LatteBufferCache_invalidatePage(index * CACHE_PAGE_SIZE); });
 }
 
 void LatteBufferCache_notifyDrawDone()

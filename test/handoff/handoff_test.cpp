@@ -30,6 +30,13 @@
 //  - the audio devices' gate (AudioDevicesGate.h): AX threads playing
 //    through a device while a title's start and stop create and destroy it
 //    never touch one being destroyed, and are never kept waiting;
+//  - AtomicPageSet (the data cache flushes the CPU reports for the GPU): a
+//    page added before a drain begins is reported, by it or an earlier one,
+//    and every page added is reported once all is drained;
+//  - PPCTimerClock (the guest's time base): never goes backwards on any core
+//    or across them, runs at the console's clock over the TSC's rate times
+//    the shift, and moves no time already counted when the rate is refined
+//    or the shift changes under readers;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -46,6 +53,9 @@
 #include "util/helpers/MpscList.h"
 #include "libretro/LibretroVkQueue.h"
 #include "audio/AudioDevicesGate.h"
+#include "util/helpers/AtomicPageSet.h"
+#include "Cafe/HW/Espresso/PPCTimerClock.h"
+#include <set>
 #include "libretro.h"
 #include "libretro_vulkan.h"
 #include <fstream>
@@ -717,6 +727,137 @@ static void TestAudioDevicesGate()
 	CHECK(fed.load() > 0);
 }
 
+// --- data cache flush pages -------------------------------------------------
+
+static void TestAtomicPageSet()
+{
+	constexpr size_t kPages = 1 << 16;
+	AtomicPageSet<kPages> set;
+	// One page at a time, handed over: added, then the drain that starts
+	// after must report it unless one before already did
+	{
+		std::atomic<uint32_t> added{UINT32_MAX};
+		std::atomic_bool stop{false};
+		bool missed = false;
+		std::thread producer([&] {
+			for (uint32_t i = 0; i < 20000; i++)
+			{
+				const uint32_t page = (i * 2654435761u) % kPages;
+				set.Add(page, page);
+				added.store(page, std::memory_order_release);
+				while (added.load(std::memory_order_acquire) != UINT32_MAX && !stop.load())
+					std::this_thread::yield();
+			}
+			stop.store(true);
+		});
+		while (!stop.load())
+		{
+			const uint32_t page = added.load(std::memory_order_acquire);
+			if (page == UINT32_MAX)
+			{
+				std::this_thread::yield();
+				continue;
+			}
+			bool seen = false;
+			set.Drain([&](uint32_t p) { seen = seen || p == page; });
+			missed = missed || !seen;
+			added.store(UINT32_MAX, std::memory_order_release);
+		}
+		producer.join();
+		CHECK(!missed);
+	}
+	// Ranges from several threads while it is drained: everything added is
+	// reported by the time all of it is drained, nothing that was not
+	{
+		std::vector<std::atomic<uint8_t>> expected(kPages);
+		std::vector<std::atomic<uint8_t>> got(kPages);
+		std::atomic<int> done{0};
+		std::vector<std::thread> producers;
+		for (int t = 0; t < 4; t++)
+			producers.emplace_back([&, t] {
+				uint32_t x = 12345 + t;
+				for (int i = 0; i < 20000; i++)
+				{
+					x = x * 1103515245u + 12345u;
+					const uint32_t first = (x >> 8) % kPages;
+					const uint32_t last = std::min<uint32_t>(first + (x % 200), kPages - 1);
+					for (uint32_t p = first; p <= last; p++)
+						expected[p].store(1, std::memory_order_relaxed);
+					set.Add(first, last);
+				}
+				done.fetch_add(1);
+			});
+		auto drain = [&] { set.Drain([&](uint32_t p) { got[p].store(1, std::memory_order_relaxed); }); };
+		while (done.load() != 4)
+			drain();
+		for (auto& t : producers)
+			t.join();
+		drain();
+		bool same = true;
+		for (size_t p = 0; p < kPages; p++)
+			same = same && expected[p].load() == got[p].load();
+		CHECK(same);
+		CHECK(set.MaybeEmpty());
+	}
+}
+
+// --- guest time base -----------------------------------------------------
+
+static void TestPPCTimerClock()
+{
+	PPCTimerClock clock;
+	std::atomic<uint64_t> tsc{1000000};
+	std::atomic<uint64_t> freq{0};
+	std::atomic<int> shift{3};
+	clock.Restart(tsc.load());
+	// No rate yet: time stands still at 0
+	CHECK(clock.Read(tsc.fetch_add(1000), 0, 3) == 0);
+	// Rate: 1 TSC tick per console tick at shift 3 (x1)
+	freq.store(PPCTimerClock::kConsoleClock);
+	const uint64_t t0 = clock.Read(tsc.load(), freq.load(), 3);
+	tsc.fetch_add(5000);
+	const uint64_t t1 = clock.Read(tsc.load(), freq.load(), 3);
+	CHECK(t1 - t0 == 5000);
+	// Shift 2 (x2): twice the rate from here, nothing already counted moves
+	const uint64_t t2 = clock.Read(tsc.load(), freq.load(), 2);
+	CHECK(t2 == t1);
+	tsc.fetch_add(5000);
+	CHECK(clock.Read(tsc.load(), freq.load(), 2) - t2 == 10000);
+	shift.store(2);
+
+	// Readers on four threads, the TSC moving, the rate refined and the shift
+	// changed under them: every thread's reads ascend, and no read is behind
+	// one any thread finished before it started
+	std::atomic_bool stop{false}, bad{false};
+	std::atomic<uint64_t> finished{0}; // the highest value a read has returned
+	std::vector<std::thread> readers;
+	for (int r = 0; r < 4; r++)
+		readers.emplace_back([&] {
+			uint64_t mine = 0;
+			while (!stop.load(std::memory_order_relaxed))
+			{
+				const uint64_t floor = finished.load(std::memory_order_acquire);
+				const uint64_t v = clock.Read(tsc.fetch_add(3, std::memory_order_relaxed), freq.load(), (uint8_t)shift.load());
+				if (v < mine || v < floor)
+					bad.store(true);
+				mine = v;
+				uint64_t f = finished.load(std::memory_order_relaxed);
+				while (v > f && !finished.compare_exchange_weak(f, v, std::memory_order_release))
+					;
+			}
+		});
+	for (int i = 0; i < 200; i++)
+	{
+		freq.store(PPCTimerClock::kConsoleClock + (i % 7) * 1000);
+		shift.store(i % 4);
+		std::this_thread::sleep_for(std::chrono::microseconds(200));
+	}
+	stop.store(true);
+	for (auto& t : readers)
+		t.join();
+	CHECK(!bad.load());
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -932,6 +1073,8 @@ int main()
 	TestMpscList();
 	TestVkQueueLock();
 	TestAudioDevicesGate();
+	TestAtomicPageSet();
+	TestPPCTimerClock();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

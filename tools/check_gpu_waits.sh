@@ -25,7 +25,10 @@
 # Nor do the per-frame handoffs between retro_run and the other threads: the
 # frontend's Vulkan queue lock (LibretroVkQueue, every submit and every
 # frame), the GamePad's motion and its rumble requests, and AX's use of the
-# audio devices every 3 ms (AudioDevicesGate.h).
+# audio devices every 3 ms (AudioDevicesGate.h); and the two the emulated CPU
+# hits hardest, both spinlocks before: every guest time read on every core
+# (PPCTimerClock.h) and every data cache flush it reports to the GPU, down to
+# each dcbf/dcbst (AtomicPageSet.h).
 #
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
@@ -112,8 +115,10 @@ for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
 	src/libretro/LibretroVkQueue.cpp src/libretro/LibretroVkQueue.h \
 	src/util/helpers/SeqlockValue.h src/util/helpers/MpscList.h \
 	src/audio/AudioDevicesGate.h src/audio/IAudioAPI.h src/audio/IAudioAPI.cpp \
-	src/Cafe/OS/libs/snd_core/ax_out.cpp; do
-	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for'; then
+	src/Cafe/OS/libs/snd_core/ax_out.cpp \
+	src/Cafe/HW/Espresso/PPCTimer.cpp src/Cafe/HW/Espresso/PPCTimerClock.h \
+	src/Cafe/HW/Latte/Core/LatteBufferCache.cpp src/util/helpers/AtomicPageSet.h; do
+	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for|FSpinlock'; then
 		echo "$f: takes a lock or sleeps again"; fail=1
 	fi
 done
