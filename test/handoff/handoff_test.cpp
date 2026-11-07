@@ -27,6 +27,9 @@
 //    the interface it was taken through, while the frontend swaps interfaces
 //    under a submitting GPU thread, and a frame that hands over the same
 //    interface again does not wait;
+//  - the audio devices' gate (AudioDevicesGate.h): AX threads playing
+//    through a device while a title's start and stop create and destroy it
+//    never touch one being destroyed, and are never kept waiting;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -42,6 +45,7 @@
 #include "util/helpers/SeqlockValue.h"
 #include "util/helpers/MpscList.h"
 #include "libretro/LibretroVkQueue.h"
+#include "audio/AudioDevicesGate.h"
 #include "libretro.h"
 #include "libretro_vulkan.h"
 #include <fstream>
@@ -623,6 +627,10 @@ static void TestVkQueueLock()
 	});
 	// The frontend, each frame: usually the same interface (no wait at all),
 	// now and then a rebuilt one, or none
+	// (started once the submitting thread is: the swaps are the point, and
+	// 20000 of them can be over before a new thread has run at all)
+	while (submits.load(std::memory_order_relaxed) == 0)
+		std::this_thread::yield();
 	const void* sequence[] = {&a.iface, &a.iface, &a.iface, &b.iface, &b.iface, nullptr, &a.iface};
 	for (int frame = 0; frame < 20000; frame++)
 		LibretroVkQueue::SetInterface(sequence[frame % 7]);
@@ -632,6 +640,81 @@ static void TestVkQueueLock()
 	CHECK(!a.bad.load() && !b.bad.load());
 	CHECK(a.held.load() == 0 && b.held.load() == 0);
 	CHECK(submits.load() > 0);
+}
+
+// --- audio devices' gate ------------------------------------------------
+
+struct FakeAudioDevice
+{
+	std::atomic<uint64_t> fed{0};
+	uint64_t canary = 0x5ca1ab1e;
+};
+
+static void TestAudioDevicesGate()
+{
+	// A plain pointer, as g_tvAudio is: what the gate protects is exactly that
+	// it is never read while it is being replaced
+	static FakeAudioDevice* device = nullptr;
+	std::atomic_bool stop{false}, bad{false};
+	std::atomic<uint64_t> fed{0}, skipped{0};
+	std::vector<std::thread> players;
+	for (int p = 0; p < 3; p++)
+		players.emplace_back([&] {
+			while (!stop.load(std::memory_order_relaxed))
+			{
+				AudioDevicesUse devices;
+				if (!devices)
+				{
+					skipped.fetch_add(1, std::memory_order_relaxed);
+					continue;
+				}
+				if (device)
+				{
+					if (device->canary != 0x5ca1ab1e)
+						bad.store(true);
+					device->fed.fetch_add(1, std::memory_order_relaxed);
+					fed.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
+		});
+	// Titles starting and stopping, and a portal coming up alongside
+	std::thread portal([&] {
+		for (int i = 0; i < 300 && !stop.load(); i++)
+		{
+			AudioDevicesChange change;
+			if (!device)
+				device = new FakeAudioDevice();
+		}
+	});
+	for (int round = 0; round < 1000; round++)
+	{
+		{
+			AudioDevicesChange change;
+			if (!device)
+				device = new FakeAudioDevice();
+		}
+		std::this_thread::yield();
+		{
+			AudioDevicesChange change;
+			if (device)
+			{
+				device->canary = 0;
+				delete device;
+				device = nullptr;
+			}
+		}
+	}
+	portal.join();
+	stop.store(true);
+	for (auto& t : players)
+		t.join();
+	{
+		AudioDevicesChange change;
+		delete device;
+		device = nullptr;
+	}
+	CHECK(!bad.load());
+	CHECK(fed.load() > 0);
 }
 
 // --- thread-started flag ------------------------------------------------
@@ -848,6 +931,7 @@ int main()
 	TestSeqlockValue();
 	TestMpscList();
 	TestVkQueueLock();
+	TestAudioDevicesGate();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

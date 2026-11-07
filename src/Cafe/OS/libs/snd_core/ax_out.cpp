@@ -177,9 +177,9 @@ namespace snd_core
 			cemu_assert(false);
 		}
 
-		std::shared_lock lock(g_audioMutex);
+		AudioDevicesUse devices;
 
-		const uint32 channels = g_tvAudio ? g_tvAudio->GetChannels() : AX_TV_CHANNEL_COUNT;
+		const uint32 channels = (devices && g_tvAudio) ? g_tvAudio->GetChannels() : AX_TV_CHANNEL_COUNT;
 		sint16* outputChannel = tempTVChannelData + AX_SAMPLES_PER_3MS_48KHZ * tempAudioBlockCounter * channels;
 		for (sint32 i = 0; i < sampleCount; ++i)
 		{
@@ -189,7 +189,7 @@ namespace snd_core
 		tempAudioBlockCounter++;
 		if (tempAudioBlockCounter == AX_FRAMES_PER_GROUP)
 		{
-			if (g_tvAudio)
+			if (devices && g_tvAudio)
 			{
 				if (s_drcMixBlockReady)
 				{
@@ -342,8 +342,6 @@ namespace snd_core
 			cemu_assert(false);
 		}
 
-		std::shared_lock lock(g_audioMutex);
-
 		// Libretro outputs a single stereo stream. Convert DRC audio to stereo and mix into TV.
 		const uint32 channelsOut = 2;
 		const uint32 channelsIn = (uint32)AIGetChannelCount(AX_DEV_DRC);
@@ -445,7 +443,7 @@ namespace snd_core
 
 		numQueuedFramesSndGeneric = 0;
 
-		std::unique_lock lock(g_audioMutex);
+		AudioDevicesChange change;
 		if (!g_tvAudio)
 		{
 			try
@@ -478,7 +476,7 @@ namespace snd_core
 
 	void AXOut_reset()
 	{
-		std::unique_lock lock(g_audioMutex);
+		AudioDevicesChange change;
 		if (g_tvAudio)
 		{
 			g_tvAudio->Stop();
@@ -498,7 +496,9 @@ namespace snd_core
 
 	void AXOut_updateDevicePlayState(bool isPlaying)
 	{
-		std::shared_lock lock(g_audioMutex);
+		AudioDevicesUse devices;
+		if (!devices)
+			return;
 		if (g_tvAudio)
 		{
 			if (isPlaying)
@@ -617,8 +617,8 @@ namespace snd_core
 		// if we haven't buffered any blocks, we will wait less time than usual
 		bool additional_blocks_required = false;
 		{
-			const std::shared_lock lock(g_audioMutex, std::try_to_lock);
-			if (lock)
+			const AudioDevicesUse devices;
+			if (devices)
 				additional_blocks_required = (g_tvAudio && g_tvAudio->NeedAdditionalBlocks()) || (g_padAudio && g_padAudio->NeedAdditionalBlocks());
 		}
 

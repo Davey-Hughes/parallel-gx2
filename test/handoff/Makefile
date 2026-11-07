@@ -22,7 +22,8 @@ CXX_SRCS := handoff_test.cpp \
 	$(SRC)/libretro/LibretroVkQueue.cpp
 HDRS := $(SRC)/libretro/LibretroAudioRing.h $(SRC)/Cafe/HW/Latte/Core/LatteGpuWake.h \
 	$(SRC)/util/helpers/ThreadStartedFlag.h $(SRC)/util/helpers/EventWake.h $(SRC)/Cemu/Logging/LogFileSink.h \
-	$(SRC)/util/helpers/SeqlockValue.h $(SRC)/util/helpers/MpscList.h $(SRC)/libretro/LibretroVkQueue.h
+	$(SRC)/util/helpers/SeqlockValue.h $(SRC)/util/helpers/MpscList.h $(SRC)/libretro/LibretroVkQueue.h \
+	$(SRC)/audio/AudioDevicesGate.h
 
 handoff_test$(EXE): $(CXX_SRCS) $(C_SRCS) $(HDRS)
 	$(CC) $(FLAGS) -std=gnu99 -c $(LRC)/queues/retro_spsc.c -o retro_spsc.o

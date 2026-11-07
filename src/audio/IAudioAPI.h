@@ -107,7 +107,10 @@ private:
 };
 
 using AudioAPIPtr = std::unique_ptr<IAudioAPI>;
-extern std::shared_mutex g_audioMutex;
+
+// The devices below are used without a lock (AudioDevicesGate.h)
+#include "audio/AudioDevicesGate.h"
+
 extern AudioAPIPtr g_tvAudio;
 
 extern AudioAPIPtr g_padAudio;

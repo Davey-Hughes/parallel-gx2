@@ -24,7 +24,8 @@
 #
 # Nor do the per-frame handoffs between retro_run and the other threads: the
 # frontend's Vulkan queue lock (LibretroVkQueue, every submit and every
-# frame), the GamePad's motion and its rumble requests.
+# frame), the GamePad's motion and its rumble requests, and AX's use of the
+# audio devices every 3 ms (AudioDevicesGate.h).
 #
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
@@ -109,8 +110,10 @@ if pp src/Cafe/IOSU/nn/boss/boss_service.cpp | grep -q 'm_taskState = TaskState:
 fi
 for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
 	src/libretro/LibretroVkQueue.cpp src/libretro/LibretroVkQueue.h \
-	src/util/helpers/SeqlockValue.h src/util/helpers/MpscList.h; do
-	if pp $f | grep -qE 'std::[a-z_]*mutex|condition_variable|sleep_for'; then
+	src/util/helpers/SeqlockValue.h src/util/helpers/MpscList.h \
+	src/audio/AudioDevicesGate.h src/audio/IAudioAPI.h src/audio/IAudioAPI.cpp \
+	src/Cafe/OS/libs/snd_core/ax_out.cpp; do
+	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for'; then
 		echo "$f: takes a lock or sleeps again"; fail=1
 	fi
 done

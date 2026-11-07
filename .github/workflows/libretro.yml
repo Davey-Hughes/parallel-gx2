@@ -92,7 +92,7 @@ jobs:
         # waits for the GPU thread and the Audio Thread's empty pulls too;
         # the title scan, IOSU shutdown, SpotPass and nim waits as well;
         # and log.txt, the Vulkan queue lock and the motion and rumble
-        # handoffs take no lock
+        # handoffs take no lock, nor AX's use of the audio devices
         run: ./tools/check_gpu_waits.sh
 
       - name: "curl_compat against local servers"

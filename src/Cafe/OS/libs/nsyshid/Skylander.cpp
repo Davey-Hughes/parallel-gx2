@@ -564,11 +564,18 @@ namespace nsyshid
 			cemu_assert_error();
 		}
 
-		if (!g_portalAudio)
+		bool haveAudio;
+		{
+			AudioDevicesUse devices;
+			haveAudio = devices && g_portalAudio;
+		}
+		if (!haveAudio)
 		{
 			// Portal audio is mono channel, 16 bit audio.
 			// Audio is unsigned 16 bit, supplied as 64 bytes which is 32 samples per block
-			g_portalAudio = IAudioAPI::CreateDeviceFromConfig(IAudioAPI::AudioType::Portal, 8000, 32, 16);
+			AudioDevicesChange change;
+			if (!g_portalAudio)
+				g_portalAudio = IAudioAPI::CreateDeviceFromConfig(IAudioAPI::AudioType::Portal, 8000, 32, 16);
 		}
 		std::array<sint16, 32> mono_samples;
 		for (unsigned int i = 0; i < mono_samples.size(); ++i)
@@ -576,9 +583,10 @@ namespace nsyshid
 			sint16 sample = static_cast<uint16>(message->data[i * 2 + 1]) << 8 | static_cast<uint16>(message->data[i * 2]);
 			mono_samples[i] = sample;
 		}
-		if (g_portalAudio)
 		{
-			g_portalAudio->FeedBlock(mono_samples.data());
+			AudioDevicesUse devices;
+			if (devices && g_portalAudio)
+				g_portalAudio->FeedBlock(mono_samples.data());
 		}
 		message->bytesWritten = message->length;
 		return Device::WriteResult::Success;

@@ -2,7 +2,6 @@
 
 #include "config/CemuConfig.h"
 
-std::shared_mutex g_audioMutex;
 AudioAPIPtr g_tvAudio;
 AudioAPIPtr g_padAudio;
 AudioAPIPtr g_portalAudio;
