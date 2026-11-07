@@ -79,6 +79,11 @@ jobs:
         # point in the core: the frontend owns the context and the surface
         run: ./tools/check_no_wsi.sh
 
+      - name: "Controllers updated once a frame"
+        # from retro_run, after the frontend's input is polled: no input
+        # thread waking every millisecond to update them
+        run: ./tools/check_input_per_frame.sh
+
       - name: "curl_compat against local servers"
         # plain, then under AddressSanitizer + UBSan, then ThreadSanitizer
         run: |

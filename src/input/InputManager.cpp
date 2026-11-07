@@ -30,7 +30,13 @@ InputManager::InputManager()
 #endif
 
 	m_update_thread_shutdown.store(false);
+#ifndef ENABLE_LIBRETRO
 	m_update_thread = std::thread(&InputManager::update_thread, this);
+#endif
+	// Under libretro there is no thread: the frontend's input is read once a
+	// frame in retro_run, which calls update_controllers() right after - and a
+	// thread waking a thousand times a second to update controllers whose
+	// state only changes then was a thousand wakeups a second for nothing.
 }
 
 InputManager::~InputManager()
@@ -913,24 +919,28 @@ std::optional<glm::ivec2> InputManager::get_right_down_mouse_info(bool* is_pad)
 	return {};
 }
 
+void InputManager::update_controllers()
+{
+	std::shared_lock lock(m_mutex);
+	for (auto& pad : m_vpad)
+	{
+		if (pad)
+			pad->update();
+	}
+
+	for (auto& pad : m_wpad)
+	{
+		if (pad)
+			pad->update();
+	}
+}
+
 void InputManager::update_thread()
 {
 	SetThreadName("Input_update");
 	while (!m_update_thread_shutdown.load(std::memory_order::relaxed))
 	{
-		std::shared_lock lock(m_mutex);
-		for (auto& pad : m_vpad)
-		{
-			if (pad)
-				pad->update();
-		}
-
-		for (auto& pad : m_wpad)
-		{
-			if (pad)
-				pad->update();
-		}
-		lock.unlock();
+		update_controllers();
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		std::this_thread::yield();

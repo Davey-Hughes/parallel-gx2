@@ -4,6 +4,7 @@ What changed in the libretro core of this fork, newest first. Changes that come 
 
 ## Unreleased
 
+- The emulated controllers are updated once a frame, right after RetroArch's input is read, instead of by a thread of their own waking a thousand times a second to update them between frames, when nothing had changed.
 - Vulkan goes through the frontend alone too: the core's own instance and device setup, its X11, XCB, Wayland, Win32 and Metal surfaces, its swapchain and the Breath of the Wild child-process workaround that came with them are gone - none of it ever ran under libretro, where the device, surface and swapchain are RetroArch's. Linux builds no longer need X11 headers, or any headers beyond the compiler's.
 - Boot no longer waits up to three seconds for the CPU timer's calibration: a first estimate is ready 25 ms after the core loads and is refined in the background.
 - The recompiler starts on a newly run function at once instead of at its next 10 ms look, so hot code spends less time interpreted, and its work queue no longer allocates.

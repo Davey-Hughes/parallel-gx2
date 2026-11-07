@@ -7405,6 +7405,9 @@ RETRO_API void retro_run()
 	// Poll input
 	libretro_poll_input();
 	libretro_update_name_entry();
+	// The emulated controllers, now that the frontend's input is read: what
+	// upstream's input thread did every millisecond (InputManager)
+	InputManager::instance().update_controllers();
 	libretro_update_rumble();
 	libretro_update_software_keyboard();
 

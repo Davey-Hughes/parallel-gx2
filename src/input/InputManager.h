@@ -79,6 +79,10 @@ public:
 
 	std::atomic<float> m_mouse_wheel;
 
+	// One pass over every emulated controller: what the update thread does
+	// every millisecond upstream, and what retro_run does once a frame here
+	void update_controllers();
+
 private:
 	void update_thread();
 

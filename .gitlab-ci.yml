@@ -209,3 +209,14 @@ test-no-wsi:
     GIT_SUBMODULE_STRATEGY: none
   script:
     - ./tools/check_no_wsi.sh
+
+# The emulated controllers are updated once a frame from retro_run, after
+# the frontend's input is polled: no input thread waking every millisecond.
+test-input-per-frame:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - ./tools/check_input_per_frame.sh
