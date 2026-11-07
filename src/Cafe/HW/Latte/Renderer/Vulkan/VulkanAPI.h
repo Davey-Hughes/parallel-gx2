@@ -1,10 +1,6 @@
 #ifndef _VULKAN_API_
 #define _VULKAN_API_
 
-#if BOOST_OS_WINDOWS
-#define VK_USE_PLATFORM_WIN32_KHR // todo - define in CMakeLists.txt
-#endif
-
 #include <vulkan/vulkan.h>
 
 bool InitializeGlobalVulkan();
@@ -129,29 +125,8 @@ VKFUNC_DEVICE(vkCreateGraphicsPipelines);
 VKFUNC_DEVICE(vkDestroyPipeline);
 VKFUNC_DEVICE(vkCmdBindPipeline);
 
-// swapchain
-#if defined(WEBOS)
-// webOS is BOOST_OS_LINUX too, with no X11, no Wayland and no surface of its
-// own: the frontend hands the core one, so no platform entry point is loaded.
-#elif defined(__ANDROID__)
-// Android is BOOST_OS_LINUX too, but there is no X11 or Wayland here
-VKFUNC_INSTANCE(vkCreateAndroidSurfaceKHR);
-#elif BOOST_OS_LINUX || BOOST_OS_BSD
-VKFUNC_INSTANCE(vkCreateXlibSurfaceKHR);
-VKFUNC_INSTANCE(vkCreateXcbSurfaceKHR);
-#ifdef HAS_WAYLAND
-VKFUNC_INSTANCE(vkCreateWaylandSurfaceKHR);
-#endif
-#endif
-
-#if BOOST_OS_WINDOWS
-VKFUNC_INSTANCE(vkCreateWin32SurfaceKHR);
-#endif
-
-#if BOOST_OS_MACOS
-VKFUNC_INSTANCE(vkCreateMetalSurfaceEXT);
-#endif
-
+// swapchain: no platform surface entry points - the frontend owns the surface
+// and the swapchain, and hands the core an image to draw into
 VKFUNC_INSTANCE(vkDestroySurfaceKHR);
 VKFUNC_DEVICE(vkCreateSwapchainKHR);
 VKFUNC_DEVICE(vkDestroySwapchainKHR);

@@ -187,7 +187,7 @@ else ifneq (,$(filter android-arm64 android-x86_64,$(platform)))
    CC  = $(ANDROID_NDK_LLVM)/bin/clang --target=$(ANDROID_TRIPLE)
    CXX = $(ANDROID_NDK_LLVM)/bin/clang++ --target=$(ANDROID_TRIPLE)
    AR  = $(ANDROID_NDK_LLVM)/bin/llvm-ar
-   FLAGS   += -DANDROID -DVK_USE_PLATFORM_ANDROID_KHR -funwind-tables
+   FLAGS   += -DANDROID -funwind-tables
    LDFLAGS += -static-libstdc++
    LIBS += -landroid -llog -lm -ldl
 

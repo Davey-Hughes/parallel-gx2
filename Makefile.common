@@ -447,7 +447,6 @@ ifeq ($(HAVE_VULKAN),1)
 	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/LatteTextureViewVk.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/LatteTextureVk.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/SwapchainInfoVk.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/TextureReadbackVk.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Latte/Renderer/Vulkan/VKRPipelineInfo.cpp \
@@ -479,8 +478,7 @@ ifeq ($(HAVE_METAL),1)
 	$(SRC_DIR)/imgui/imgui_impl_metal.mm
    ifeq ($(OS_MACOS),1)
       CORE_SOURCES_OBJCXX += \
-	$(SRC_DIR)/Cafe/HW/Latte/Renderer/MetalView.mm \
-	$(SRC_DIR)/Cafe/HW/Latte/Renderer/Vulkan/CocoaSurface.mm
+	$(SRC_DIR)/Cafe/HW/Latte/Renderer/MetalView.mm
    endif
 endif
 ifeq ($(HAVE_LIBUSB),1)
@@ -516,15 +514,8 @@ endif
 ifeq ($(HAVE_METAL),1)
    CORE_FLAGS += -DENABLE_METAL -DIMGUI_IMPL_METAL_CPP -I$(DEP_DIR)/metal-cpp
 endif
-ifeq ($(OS_APPLE),1)
-   CORE_FLAGS += -DVK_USE_PLATFORM_MACOS_MVK -DVK_USE_PLATFORM_METAL_EXT
-endif
-# desktop Linux: the X11 surfaces (Xlib and XCB headers); webOS has none
-ifeq ($(OS_LINUX),1)
-ifneq ($(platform),webos)
-   CORE_FLAGS += -DVK_USE_PLATFORM_XLIB_KHR -DVK_USE_PLATFORM_XCB_KHR
-endif
-endif
+# No VK_USE_PLATFORM_*: the surface and the swapchain are the frontend's, so
+# no window-system header is ever included
 ifeq ($(HAVE_LIBUSB),1)
    CORE_FLAGS += -DHAS_LIBUSB
 endif

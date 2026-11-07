@@ -15,12 +15,12 @@ Build it yourself for anything else, or to test a change.
 A static Makefile builds the core and everything it uses: the libraries are
 submodules built with it, and the network layer is libretro-common's (HTTP
 and TLS, with no libcurl, OpenSSL or mbedTLS), so nothing but a C++20
-compiler and, on Linux, the system's X11 headers (for Vulkan's surface
-declarations) is needed.
+compiler is needed - no GL, X11 or other window-system headers either, as the
+graphics context, the surface and the swapchain are all the frontend's.
 
 ```bash
-# Ubuntu/Debian: the headers Vulkan's X11 surfaces are declared with
-sudo apt install -y g++ make libx11-dev libxrender-dev libx11-xcb-dev
+# Ubuntu/Debian
+sudo apt install -y g++ make
 
 # Clone with submodules - the libraries and the community graphic packs live
 # in them. On an existing clone: git submodule update --init --recursive

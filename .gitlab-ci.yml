@@ -62,20 +62,14 @@ stages:
 ##############################################################################
 #
 ################################### DESKTOPS #################################
-# Linux wants the X11 and XCB headers Vulkan's surfaces are declared with
-# (OpenGL needs none: the context is the frontend's); a job defining
-# before_script replaces the template's, so its one line is repeated here.
+# Linux needs no system headers beyond the compiler's: the GL context and the
+# Vulkan surface and swapchain are the frontend's.
 .core-defs-linux:
   extends: .core-defs
   variables:
     # Cemu is C++20
     CC: gcc-12
     CXX: g++-12
-  before_script:
-    - export NUMPROC=$(($(nproc)/5))
-    - apt-get update -qq
-    - apt-get install -y --no-install-recommends
-      libx11-dev libxrender-dev libx11-xcb-dev
 
 # Windows 64-bit
 libretro-build-windows-x64:
@@ -204,3 +198,14 @@ test-handoff:
     - SANITIZER=thread ./test/handoff/run_tests.sh
     - make -C test/handoff clean
     - SANITIZER=address,undefined ./test/handoff/run_tests.sh
+
+# No X11/XCB/Wayland/GL/EGL header, VK_USE_PLATFORM_* or platform surface
+# entry point in the core: the frontend owns the context and the surface.
+test-no-wsi:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - ./tools/check_no_wsi.sh

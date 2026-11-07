@@ -4,6 +4,7 @@ What changed in the libretro core of this fork, newest first. Changes that come 
 
 ## Unreleased
 
+- Vulkan goes through the frontend alone too: the core's own instance and device setup, its X11, XCB, Wayland, Win32 and Metal surfaces, its swapchain and the Breath of the Wild child-process workaround that came with them are gone - none of it ever ran under libretro, where the device, surface and swapchain are RetroArch's. Linux builds no longer need X11 headers, or any headers beyond the compiler's.
 - Boot no longer waits up to three seconds for the CPU timer's calibration: a first estimate is ready 25 ms after the core loads and is refined in the background.
 - The recompiler starts on a newly run function at once instead of at its next 10 ms look, so hot code spends less time interpreted, and its work queue no longer allocates.
 - Vulkan: loading the pipeline cache no longer pauses 10 ms whenever 50 pipelines are queued, which held a warm cache to 5,000 pipelines a second; closing content no longer waits up to 250 ms for the pipeline cache's save thread.

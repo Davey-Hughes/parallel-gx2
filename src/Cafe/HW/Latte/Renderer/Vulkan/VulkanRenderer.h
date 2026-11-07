@@ -9,7 +9,6 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureViewVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/CachedFBOVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.h"
-#include "Cafe/HW/Latte/Renderer/Vulkan/SwapchainInfoVk.h"
 #include "util/math/vector2.h"
 #include "util/helpers/Semaphore.h"
 #include "util/containers/flat_hash_map.hpp"
@@ -159,8 +158,6 @@ class VulkanRenderer : public Renderer
 	friend class LatteTextureReadbackInfoVk;
 	friend class PipelineCompiler;
 
-	using VSync = SwapchainInfoVk::VSync;
-
 	static const inline int UNIFORMVAR_RINGBUFFER_SIZE = 1024 * 1024 * 16; // 16MB
 
 	static const inline int TEXTURE_READBACK_SIZE = 32 * 1024 * 1024; // 32 MB
@@ -190,20 +187,8 @@ public:
 		sint32 texelCountY;
 	}FormatInfoVK;
 
-	struct DeviceInfo
-	{
-		DeviceInfo(const std::string name, std::span<uint8, VK_UUID_SIZE> uuid)
-			: name(name)
-		{
-			std::copy(uuid.begin(), uuid.end(), this->uuid.begin());
-		}
-
-		std::string name;
-		std::array<uint8, VK_UUID_SIZE> uuid;
-	};
-
-	static std::vector<DeviceInfo> GetDevices();
-	VulkanRenderer();
+	// The device is always the frontend's (libretro's Vulkan HW interface): no
+	// instance, surface or swapchain of the core's own
 	// Constructor that uses an externally created device (for libretro Vulkan HW render)
 	VulkanRenderer(VkInstance instance, VkPhysicalDevice physDevice, VkDevice device, VkQueue queue, uint32_t queueFamilyIndex);
 	virtual ~VulkanRenderer();
@@ -214,31 +199,12 @@ public:
 
 	void GetDeviceFeatures();
 	void DetermineVendor();
-	void InitializeSurface(const Vector2i& size, bool mainWindow);
-
-	const std::unique_ptr<SwapchainInfoVk>& GetChainInfoPtr(bool mainWindow) const;
-	SwapchainInfoVk& GetChainInfo(bool mainWindow) const;
-
-	void StopUsingPadAndWait();
 	bool IsPadWindowActive() override;
 
 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
 
 	void QueryMemoryInfo();
 	void QueryAvailableFormats();
-
-#if BOOST_OS_WINDOWS
-	static VkSurfaceKHR CreateWinSurface(VkInstance instance, HWND hwindow);
-#endif
-#if (BOOST_OS_LINUX || BOOST_OS_BSD) && !defined(__ANDROID__) && !defined(WEBOS)
-	static VkSurfaceKHR CreateXlibSurface(VkInstance instance, Display* dpy, Window window);
-    static VkSurfaceKHR CreateXcbSurface(VkInstance instance, xcb_connection_t* connection, xcb_window_t window);
-	#ifdef HAS_WAYLAND
-	static VkSurfaceKHR CreateWaylandSurface(VkInstance instance, wl_display* display, wl_surface* surface);
-	#endif
-#endif
-
-	static VkSurfaceKHR CreateFramebufferSurface(VkInstance instance, struct WindowSystem::WindowHandleInfo& windowInfo);
 
 	void AppendOverlayDebugInfo() override;
 
@@ -294,7 +260,6 @@ public:
 
 	void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground) override;
 	void CreateDescriptorPool();
-	VkDescriptorSet backbufferBlit_createDescriptorSet(VkDescriptorSetLayout descriptor_set_layout, LatteTextureViewVk* texViewVk, bool useLinearTexFilter);
 
 	robin_hood::unordered_flat_map<uint64, robin_hood::unordered_flat_map<uint64, PipelineInfo*> > m_pipeline_info_cache; // using robin_hood::unordered_flat_map is twice as fast (1-2% overall CPU time reduction)
 	void draw_debugPipelineHashState();
@@ -448,10 +413,6 @@ private:
 		bool drawSequenceSkip; // if true, skip draw_execute()
 	}m_state;
 
-	std::unique_ptr<SwapchainInfoVk> m_mainSwapchainInfo{}, m_padSwapchainInfo{};
-	std::atomic_flag m_destroyPadSwapchainNextAcquire{};
-	bool IsSwapchainInfoValid(bool mainWindow) const;
-
 	VkRenderPass m_imguiRenderPass = VK_NULL_HANDLE;
 
 	VkDescriptorPool m_descriptorPool;
@@ -464,7 +425,6 @@ private:
 
 		bool IsComplete() const	{ return graphicsFamily >= 0 && presentFamily >= 0;	}
 	};
-	static QueueFamilyIndices FindQueueFamilies(VkSurfaceKHR surface, VkPhysicalDevice device);
 
   private:
 
@@ -517,12 +477,8 @@ private:
 
 	}m_featureControl{};
 	static bool CheckDeviceExtensionSupport(const VkPhysicalDevice device, FeatureControl& info);
-	static std::vector<const char*> CheckInstanceExtensionSupport(FeatureControl& info);
 
-	bool UpdateSwapchainProperties(bool mainWindow);
-	void SwapBuffer(bool mainWindow);
 
-	VkDescriptorSetLayout m_swapchainDescriptorSetLayout;
 
 	VkQueue m_graphicsQueue, m_presentQueue;
 
@@ -530,12 +486,10 @@ private:
 
 	std::vector<VkDeviceQueueCreateInfo> CreateQueueCreateInfos(const std::set<int>& uniqueQueueFamilies) const;
 	VkDeviceCreateInfo CreateDeviceCreateInfo(const std::vector<VkDeviceQueueCreateInfo>& queueCreateInfos, const VkPhysicalDeviceFeatures& deviceFeatures, const void* deviceExtensionStructs, std::vector<const char*>& used_extensions) const;
-	static bool IsDeviceSuitable(VkSurfaceKHR surface, const VkPhysicalDevice& device);
 
 	void CreateCommandPool();
 	void CreateCommandBuffers();
 
-	void swapchain_createDescriptorSetLayout();
 
 	// shader
 
@@ -594,9 +548,6 @@ private:
 	// misc
 	void CreatePipelineCache();
 	VkPipelineShaderStageCreateInfo CreatePipelineShaderStageCreateInfo(VkShaderStageFlagBits stage, VkShaderModule& module, const char* entryName) const;
-	VkPipeline backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, RendererOutputShader* shader);
-	bool AcquireNextSwapchainImage(bool mainWindow);
-	void RecreateSwapchain(bool mainWindow, bool skipCreate = false);
 
 	// streamout
 	void streamout_setupXfbBuffer(uint32 bufferIndex, sint32 ringBufferOffset, uint32 rangeAddr, uint32 rangeSize) override;
@@ -631,7 +582,6 @@ private:
 	bool m_pipeline_cache_wake_ok = false;
 	bool PipelineCacheSaveWait(std::chrono::milliseconds duration);
 	VkPipelineCache m_pipeline_cache{ nullptr };
-	std::unordered_map<uint64, VkPipeline> m_backbufferBlitPipelineCache;
 	std::unordered_map<uint64, VkDescriptorSet> m_backbufferBlitDescriptorSetCache;
 	VkPipelineLayout m_pipelineLayout{nullptr};
 	VkCommandPool m_commandPool{ nullptr };

@@ -50,3 +50,7 @@ src/util/helpers/ZipArchive.h
 src/Common/GLInclude/egl.h
 src/Common/GLInclude/glxext.h
 src/Common/GLInclude/wglext.h
+src/Cafe/HW/Latte/Renderer/Vulkan/SwapchainInfoVk.cpp
+src/Cafe/HW/Latte/Renderer/Vulkan/SwapchainInfoVk.h
+src/Cafe/HW/Latte/Renderer/Vulkan/CocoaSurface.mm
+src/Cafe/HW/Latte/Renderer/Vulkan/CocoaSurface.h

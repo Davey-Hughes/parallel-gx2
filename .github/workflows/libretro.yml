@@ -3,9 +3,10 @@ name: Build libretro core
 # Builds parallel_gx2_libretro with the Makefile for every target the core
 # currently supports and uploads each result as an artifact, so a release
 # can be assembled from them. The dependencies are submodules built with
-# the core, so a job installs no libraries beyond the system's X11 headers
-# on Linux (Vulkan's surface declarations). Also runs the network layer's
-# and the OpenGL GPU cothread's tests.
+# the core, so a job installs no libraries at all - not even GL or X11
+# headers, as the context, surface and swapchain are the frontend's. Also
+# runs the network layer's, the OpenGL GPU cothread's and the thread
+# handoffs' tests.
 
 on:
   push:
@@ -46,11 +47,10 @@ jobs:
           fetch-depth: 0
 
       - name: "Install dependencies"
-        # the headers Vulkan's X11 surfaces are declared with
+        # the compiler, and nothing else
         run: |
           sudo apt update -qq
-          sudo apt install -y --no-install-recommends g++-12 \
-            libx11-dev libxrender-dev libx11-xcb-dev
+          sudo apt install -y --no-install-recommends g++-12
 
       - name: "Build"
         run: make -j $(nproc) CC=gcc-12 CXX=g++-12
@@ -73,6 +73,11 @@ jobs:
     steps:
       - name: "Checkout repo"
         uses: actions/checkout@v6
+
+      - name: "No window-system code"
+        # no X11/XCB/Wayland/GL/EGL header, VK_USE_PLATFORM_* or surface entry
+        # point in the core: the frontend owns the context and the surface
+        run: ./tools/check_no_wsi.sh
 
       - name: "curl_compat against local servers"
         # plain, then under AddressSanitizer + UBSan, then ThreadSanitizer
