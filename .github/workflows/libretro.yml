@@ -90,7 +90,8 @@ jobs:
         # and the IOSU services' threads sleep until notified, not by the
         # clock; nor is the pause gate a mutex any more; context_destroy's
         # waits for the GPU thread and the Audio Thread's empty pulls too;
-        # the title scan, IOSU shutdown, SpotPass and nim waits as well
+        # the title scan, IOSU shutdown, SpotPass and nim waits as well;
+        # and log.txt takes no lock
         run: ./tools/check_gpu_waits.sh
 
       - name: "curl_compat against local servers"

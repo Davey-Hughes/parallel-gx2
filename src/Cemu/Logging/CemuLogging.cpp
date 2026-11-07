@@ -5,9 +5,14 @@
 #include "config/ActiveSettings.h"
 #include "config/LaunchSettings.h"
 
-#include <mutex>
-#include <condition_variable>
+#include <atomic>
 #include <chrono>
+#include <ctime>
+#include <iterator>
+
+#include <new>
+
+#include "LogFileSink.h"
 
 #include <fmt/printf.h>
 
@@ -20,14 +25,15 @@ class LoggingDispatcher
 	{
 	} s_defaultCallbacks;
 
-	LoggingCallbacks* m_loggingCallbacks = &s_defaultCallbacks;
-	std::shared_mutex m_mutex;
+	// No lock: every thread that logs reads this, and a reader-writer lock
+	// there was a shared lock on every line. The callbacks are statics that
+	// outlive any line still being dispatched to them after a switch.
+	std::atomic<LoggingCallbacks*> m_loggingCallbacks{&s_defaultCallbacks};
 
   public:
 	void Log(std::string_view filter, std::string_view message)
 	{
-		std::shared_lock lock(m_mutex);
-		m_loggingCallbacks->Log(filter, message);
+		m_loggingCallbacks.load(std::memory_order_acquire)->Log(filter, message);
 	}
 
 	void Log(std::string_view message)
@@ -37,8 +43,7 @@ class LoggingDispatcher
 
 	void Log(std::string_view filter, std::wstring_view message)
 	{
-		std::shared_lock lock(m_mutex);
-		m_loggingCallbacks->Log(filter, message);
+		m_loggingCallbacks.load(std::memory_order_acquire)->Log(filter, message);
 	}
 
 	void Log(std::wstring_view message)
@@ -48,16 +53,14 @@ class LoggingDispatcher
 
 	void setCallbacks(LoggingCallbacks* loggingCallbacks)
 	{
-		std::unique_lock lock(m_mutex);
-		cemu_assert_debug(m_loggingCallbacks == &s_defaultCallbacks);
-		m_loggingCallbacks = loggingCallbacks;
+		cemu_assert_debug(m_loggingCallbacks.load() == &s_defaultCallbacks);
+		m_loggingCallbacks.store(loggingCallbacks, std::memory_order_release);
 	}
 
 	void clearCallbacks()
 	{
-		std::unique_lock lock(m_mutex);
-		cemu_assert_debug(m_loggingCallbacks != &s_defaultCallbacks);
-		m_loggingCallbacks = &s_defaultCallbacks;
+		cemu_assert_debug(m_loggingCallbacks.load() != &s_defaultCallbacks);
+		m_loggingCallbacks.store(&s_defaultCallbacks, std::memory_order_release);
 	}
 } s_loggingDispatcher;
 
@@ -71,26 +74,14 @@ void cemuLog_clearCallbacks()
 	s_loggingDispatcher.clearCallbacks();
 }
 
-struct _LogContext
+// log.txt (LogFileSink.h). Never destroyed, as a detached thread may still
+// be logging at exit.
+static LogFileSink& LogFile()
 {
-	std::condition_variable_any log_condition;
-	std::recursive_mutex log_mutex;
-	std::ofstream file_stream;
-	std::vector<std::string> text_cache;
-	std::thread log_writer;
-	std::atomic<bool> threadRunning = false;
-
-	~_LogContext()
-	{
-		// safely shut down the log writer thread
-		threadRunning.store(false);
-		if (log_writer.joinable())
-		{
-			log_condition.notify_one();
-			log_writer.join();
-		}
-	}
-}LogContext;
+	alignas(LogFileSink) static unsigned char s_storage[sizeof(LogFileSink)];
+	static LogFileSink* s_sink = new (s_storage) LogFileSink();
+	return *s_sink;
+}
 
 const std::map<LogType, std::string> g_logging_window_mapping
 {
@@ -126,30 +117,6 @@ bool cemuLog_advancedPPCLoggingEnabled()
 	return GetConfig().advanced_ppc_logging;
 }
 
-void cemuLog_thread()
-{
-	SetThreadName("cemuLog_thread");
-	while (true)
-	{
-		std::unique_lock lock(LogContext.log_mutex);
-		while (LogContext.text_cache.empty())
-		{
-			LogContext.log_condition.wait(lock);
-			if (!LogContext.threadRunning.load(std::memory_order::relaxed))
-				return;
-		}
-
-		std::vector<std::string> cache_copy;
-		cache_copy.swap(LogContext.text_cache); // fast copy & clear
-		lock.unlock();
-
-		for (const auto& entry : cache_copy)
-			LogContext.file_stream.write(entry.data(), entry.size());
-
-		LogContext.file_stream.flush();
-	}
-}
-
 fs::path cemuLog_GetLogFilePath()
 {
     return ActiveSettings::GetUserDataPath("log.txt");
@@ -166,12 +133,7 @@ void cemuLog_setFileLoggingEnabled(bool enabled)
 		cemuLog_createLogFile(false);
 		return;
 	}
-	std::unique_lock lock(LogContext.log_mutex);
-	if (LogContext.file_stream.is_open())
-	{
-		LogContext.file_stream.flush();
-		LogContext.file_stream.close();
-	}
+	LogFile().Close();
 }
 
 void cemuLog_createLogFile(bool triggeredByCrash)
@@ -180,55 +142,35 @@ void cemuLog_createLogFile(bool triggeredByCrash)
 	// leaves out, and this is the file that says what happened.
 	if (!triggeredByCrash && !s_fileLoggingEnabled.load())
 		return;
-	std::unique_lock lock(LogContext.log_mutex);
-	if (LogContext.file_stream.is_open())
+	if (LogFile().IsOpen())
 		return;
-
-	const auto path = cemuLog_GetLogFilePath();
-	LogContext.file_stream.open(path, std::ios::out);
-	if (LogContext.file_stream.fail())
-	{
+	if (!LogFile().Open(cemuLog_GetLogFilePath()))
 		cemu_assert_debug(false);
-		return;
-	}
-
-	lock.unlock();
 }
 
 void cemuLog_writeLineToLog(std::string_view text, bool date, bool new_line)
 {
-	std::unique_lock lock(LogContext.log_mutex);
-
+	// The whole line in one buffer, for one write
+	std::string line;
+	line.reserve(16 + text.size() + 1);
 	if (date)
 	{
 		const auto now = std::chrono::system_clock::now();
 		const auto temp_time = std::chrono::system_clock::to_time_t(now);
-		const auto& time = *std::localtime(&temp_time);
-
-		auto time_str = fmt::format("[{:02d}:{:02d}:{:02d}.{:03d}] ", time.tm_hour, time.tm_min, time.tm_sec,
-			std::chrono::duration_cast<std::chrono::milliseconds>(now - std::chrono::time_point_cast<std::chrono::seconds>(now)).count());
-
-		LogContext.text_cache.emplace_back(std::move(time_str));
+		std::tm time{};
+#ifdef _WIN32
+		localtime_s(&time, &temp_time);
+#else
+		localtime_r(&temp_time, &time);
+#endif
+		fmt::format_to(std::back_inserter(line), "[{:02d}:{:02d}:{:02d}.{:03d}] ", time.tm_hour, time.tm_min, time.tm_sec,
+			(int)std::chrono::duration_cast<std::chrono::milliseconds>(now - std::chrono::time_point_cast<std::chrono::seconds>(now)).count());
 	}
-
-	LogContext.text_cache.emplace_back(text);
-
+	line.append(text);
 	if (new_line)
-		LogContext.text_cache.emplace_back("\n");
+		line.push_back('\n');
 
-	// The core lives inside the frontend's process and dies with it. Anything
-	// still sitting in text_cache when that happens is lost, which is exactly
-	// what makes a crash report unusable - so write through instead.
-	if (LogContext.file_stream.is_open())
-	{
-		for (const auto& entry : LogContext.text_cache)
-			LogContext.file_stream.write(entry.data(), entry.size());
-		LogContext.file_stream.flush();
-	}
-	// Cleared either way. With no file to drain it into, a cache that is only
-	// ever appended to is a leak that grows for as long as the core runs.
-	LogContext.text_cache.clear();
-	lock.unlock();
+	LogFile().Write(line.data(), line.size());
 }
 
 bool cemuLog_log(LogType type, std::string_view text)
@@ -275,23 +217,12 @@ void cemuLog_logHexDump(LogType type, const void* data, size_t size, size_t line
 	}
 }
 
+// Nothing is held back in the process any more - a line is written as it is
+// logged - so all this still does is make sure there is a file to have been
+// written to.
 void cemuLog_waitForFlush()
 {
 	cemuLog_createLogFile(false);
-	std::unique_lock lock(LogContext.log_mutex);
-	while(!LogContext.text_cache.empty())
-	{
-		lock.unlock();
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		std::this_thread::yield();
-		lock.lock();
-	}
-}
-
-// used to atomically write multiple lines to the log
-std::unique_lock<decltype(LogContext.log_mutex)> cemuLog_acquire()
-{
-	return std::unique_lock(LogContext.log_mutex);
 }
 
 void cemuLog_setActiveLoggingFlags(uint64 flagMask)

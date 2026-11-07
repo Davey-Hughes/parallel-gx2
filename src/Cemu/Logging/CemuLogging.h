@@ -132,10 +132,9 @@ fs::path cemuLog_GetLogFilePath();
 void cemuLog_createLogFile(bool triggeredByCrash);
 // Whether log.txt is written at all. A frontend has a log of its own, and a
 // core that cannot be told to stop writing a second one leaves the user no way
-// to run without touching the disk. Off closes the file if it is already open;
-// on opens it again.
+// to run without touching the disk. Off closes the file if it is already open
+// (once the writes in flight are done); on opens it again.
 void cemuLog_setFileLoggingEnabled(bool enabled);
-[[nodiscard]] std::unique_lock<std::recursive_mutex> cemuLog_acquire(); // used for logging multiple lines at once
 
 class LoggingCallbacks
 {

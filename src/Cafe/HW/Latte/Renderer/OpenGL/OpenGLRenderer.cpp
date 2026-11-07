@@ -243,7 +243,6 @@ void LoadOpenGLImports()
 void OpenGLRenderer::Initialize()
 {
 	Renderer::Initialize();
-	auto lock = cemuLog_acquire();
 	cemuLog_log(LogType::Force, "------- Init OpenGL graphics backend -------");
 
 	GLCanvas_MakeCurrent(false);
@@ -319,8 +318,6 @@ void OpenGLRenderer::Initialize()
 
 	glGenProgramPipelines(1, &m_pipeline);
 	glBindProgramPipeline(m_pipeline);
-
-	lock.unlock();
 
 	// create framebuffer for fast clearing (avoid glClearTexSubImage on Nvidia)
 	if (glCreateFramebuffers)

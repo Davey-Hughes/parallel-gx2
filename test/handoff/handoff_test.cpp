@@ -16,6 +16,9 @@
 //    the last of many workers out wakes the shutdown wait, a bounded wait
 //    comes back by its deadline, a daemon with nothing to run sleeps until a
 //    task is made ready or it is stopped;
+//  - log.txt's lock-free sink: lines written from many threads at once come
+//    out whole and all there, and switching the file off and on under them
+//    never closes a handle a write is still using;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -27,6 +30,9 @@
 #include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 #include "util/helpers/ThreadStartedFlag.h"
 #include "util/helpers/EventWake.h"
+#include "Cemu/Logging/LogFileSink.h"
+#include <fstream>
+#include <string>
 #include "libretro/LibretroAudioRing.h"
 
 #include <atomic>
@@ -406,6 +412,93 @@ static void TestEventWake()
 	}
 }
 
+// --- log.txt ------------------------------------------------------------
+
+static std::string LogTestLine(int thread, int seq)
+{
+	// long enough that a torn write would show
+	std::string line = "T" + std::to_string(thread) + ":" + std::to_string(seq) + ":";
+	line.append(200 + (seq % 50), char('a' + thread));
+	line.push_back('\n');
+	return line;
+}
+
+static bool LogTestLineWhole(const std::string& line)
+{
+	int thread, seq;
+	if (std::sscanf(line.c_str(), "T%d:%d:", &thread, &seq) != 2)
+		return false;
+	return line + "\n" == LogTestLine(thread, seq);
+}
+
+static void TestLogFileSink()
+{
+	const auto path = std::filesystem::temp_directory_path() / "handoff_log_test.txt";
+	constexpr int kThreads = 8, kLines = 2000;
+	// All on: every line there, each whole
+	{
+		LogFileSink sink;
+		CHECK(sink.Open(path));
+		std::vector<std::thread> writers;
+		for (int t = 0; t < kThreads; t++)
+			writers.emplace_back([&sink, t] {
+				for (int i = 0; i < kLines; i++)
+				{
+					const std::string line = LogTestLine(t, i);
+					sink.Write(line.data(), line.size());
+				}
+			});
+		for (auto& w : writers)
+			w.join();
+		sink.Close();
+		std::ifstream in(path, std::ios::binary);
+		std::string line;
+		int count = 0;
+		bool whole = true;
+		while (std::getline(in, line))
+		{
+			whole = whole && LogTestLineWhole(line);
+			count++;
+		}
+		CHECK(whole);
+		CHECK(count == kThreads * kLines);
+	}
+	// Switched off and on while they write: no write lands on a closed handle
+	// (TSan and the OS would say), and what is there is whole
+	{
+		LogFileSink sink;
+		CHECK(sink.Open(path));
+		std::atomic_bool stop{false};
+		std::vector<std::thread> writers;
+		for (int t = 0; t < kThreads; t++)
+			writers.emplace_back([&sink, &stop, t] {
+				for (int i = 0; !stop.load(); i++)
+				{
+					const std::string line = LogTestLine(t, i % 100000);
+					sink.Write(line.data(), line.size());
+				}
+			});
+		for (int round = 0; round < 200; round++)
+		{
+			sink.Close();
+			CHECK(!sink.IsOpen());
+			CHECK(sink.Open(path));
+		}
+		stop.store(true);
+		for (auto& w : writers)
+			w.join();
+		sink.Close();
+		std::ifstream in(path, std::ios::binary);
+		std::string line;
+		bool whole = true;
+		while (std::getline(in, line))
+			whole = whole && LogTestLineWhole(line);
+		CHECK(whole);
+	}
+	std::error_code ec;
+	std::filesystem::remove(path, ec);
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -616,6 +709,7 @@ int main()
 	TestGpuRingIdleWait();
 	TestThreadStartedFlag();
 	TestEventWake();
+	TestLogFileSink();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();
