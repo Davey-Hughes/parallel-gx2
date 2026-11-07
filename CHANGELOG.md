@@ -4,6 +4,7 @@ What changed in the libretro core of this fork, newest first. Changes that come 
 
 ## Unreleased
 
+- Wii U archives (`.wua`) are read and written with libretro-common's zar in place of the ZArchive library, which is gone from the tree. An archive's index is read into memory once when it is opened, so finding a file or listing a folder no longer touches the disk and no longer waits on another thread, and each open file reads through a reader of its own instead of every read of the archive queueing behind one lock. Convert to WUA writes archives standalone Cemu reads, and stops with an error when the destination cannot be written, where it used to carry on.
 - The emulated controllers are updated once a frame, right after RetroArch's input is read, instead of by a thread of their own waking a thousand times a second to update them between frames, when nothing had changed.
 - Vulkan goes through the frontend alone too: the core's own instance and device setup, its X11, XCB, Wayland, Win32 and Metal surfaces, its swapchain and the Breath of the Wild child-process workaround that came with them are gone - none of it ever ran under libretro, where the device, surface and swapchain are RetroArch's. Linux builds no longer need X11 headers, or any headers beyond the compiler's.
 - Boot no longer waits up to three seconds for the CPU timer's calibration: a first estimate is ready 25 ms after the core loads and is refined in the background.

@@ -3,7 +3,6 @@
 
 #include "util/helpers/helpers.h"
 
-#include <zarchive/zarchivereader.h>
 #include "Cafe/Filesystem/ZArchiveVFS.h"
 
 bool sTLInitialized{ false };
@@ -244,21 +243,17 @@ void CafeTitleList::AddTitleFromPath(fs::path path)
 {
 	if (path.has_extension() && boost::iequals(_pathToUtf8(path.extension()), ".wua"))
 	{
-		ZArchiveReader* zar = ZArchive_OpenFromPath(path);
-		if (!zar)
+		std::unique_ptr<ZArchive> zar(ZArchive::Open(path));
+		std::vector<ZArchive::DirEntry> rootDir;
+		if (!zar || !zar->ListDir("", rootDir))
 		{
 			cemuLog_log(LogType::Force, "Found {} but it is not a valid Wii U archive file", _pathToUtf8(path));
 			return;
 		}
 		// enumerate all contained titles
-		ZArchiveNodeHandle rootDir = zar->LookUp("", false, true);
-		cemu_assert(rootDir != ZARCHIVE_INVALID_NODE);
-		for (uint32 i = 0; i < zar->GetDirEntryCount(rootDir); i++)
+		for (const ZArchive::DirEntry& dirEntry : rootDir)
 		{
-			ZArchiveReader::DirEntry dirEntry;
-			if( !zar->GetDirEntry(rootDir, i, dirEntry) )
-				continue;
-			if(!dirEntry.isDirectory)
+			if(!dirEntry.node.dir)
 				continue;
 			TitleId parsedId;
 			uint16 parsedVersion;
@@ -274,7 +269,6 @@ void CafeTitleList::AddTitleFromPath(fs::path path)
 			else
 				delete titleInfo;
 		}
-		delete zar;
 		return;
 	}
 	TitleInfo* titleInfo = new TitleInfo(path);

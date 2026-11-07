@@ -1,35 +1,67 @@
 #pragma once
 #include "Common/VFSFileStream.h"
-#include <zarchive/zarchivereader.h>
+#include <formats/zar.h>
 
-// Opens a Wii U archive the same way the rest of Cemu opens a game image:
-// through VFSFileStream, so an archive the host application hands over -
-// an Android content:// URI behind SAF, say - reads like any other file.
-// ZArchiveReader would otherwise open the path with its own std::ifstream.
-class ZArchiveVFSFileAccess : public ZArchiveFileAccess
+// A Wii U archive (.wua, and Miiverse's OfflineDB.zar) read with
+// libretro-common's zar, opened the way the rest of Cemu opens a game image:
+// through VFSFileStream, so an archive the host application hands over - an
+// Android content:// URI behind SAF, say - reads like any other file.
+//
+// The archive's index - everything past the compressed blocks: records,
+// names, tree and footer - is read into memory once on opening and never
+// changes after, so any number of threads look paths up and list
+// directories at once, each with a zar_t of its own and no I/O. A file's
+// octets are read through a ZArchiveFile, which has its own reader and its
+// own stream of the archive: nothing is shared between threads that read.
+class ZArchive
 {
 public:
-	ZArchiveVFSFileAccess(VFSFileStream* stream) : m_stream(stream) {}
+	using Node = zar_file_t;
 
-	uint64_t GetSize() override
+	struct DirEntry
 	{
-		return m_stream->GetSize();
-	}
+		std::string name;
+		Node node;
+	};
 
-	bool ReadBytes(uint64_t offset, void* buffer, uint32_t size) override
-	{
-		m_stream->SetPosition(offset);
-		return m_stream->readData(buffer, size) == size;
-	}
+	static ZArchive* Open(const fs::path& path);
+
+	// A file or a directory; the empty path is the root
+	std::optional<Node> LookUp(std::string_view path) const;
+	// A directory's entries, in name order
+	bool ListDir(std::string_view path, std::vector<DirEntry>& entries) const;
+
+	const fs::path& GetPath() const { return m_path; }
+	uint64 GetSize() const { return m_size; }
+
+	// What a reader asked for: from the index in memory, or from @stream
+	size_t Supply(const zar_request_t& req, VFSFileStream* stream) const;
 
 private:
-	std::unique_ptr<VFSFileStream> m_stream;
+	ZArchive() = default;
+	zar_t* NewReader() const;
+
+	fs::path m_path;
+	uint64 m_size{};
+	uint64 m_indexOffset{};
+	std::vector<uint8> m_index;
 };
 
-inline ZArchiveReader* ZArchive_OpenFromPath(const fs::path& path)
+class ZArchiveFile
 {
-	VFSFileStream* stream = VFSFileStream::openFile2(path);
-	if (!stream)
-		return nullptr;
-	return ZArchiveReader::OpenFromFileAccess(std::make_unique<ZArchiveVFSFileAccess>(stream));
-}
+public:
+	ZArchiveFile(const ZArchive& archive, const ZArchive::Node& file) : m_archive(archive), m_file(file) {}
+	~ZArchiveFile();
+	ZArchiveFile(const ZArchiveFile&) = delete;
+	ZArchiveFile& operator=(const ZArchiveFile&) = delete;
+
+	uint64 GetSize() const { return m_file.size; }
+	// Octets read: fewer than @size only at the file's end or on an error
+	uint64 Read(uint64 offset, void* buffer, uint64 size);
+
+private:
+	const ZArchive& m_archive;
+	ZArchive::Node m_file;
+	zar_t* m_reader{};
+	std::unique_ptr<VFSFileStream> m_stream;
+};

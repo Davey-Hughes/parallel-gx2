@@ -4,9 +4,6 @@
 #include "Cafe/Filesystem/ZArchiveVFS.h"
 #include "Common/VFSFileStream.h"
 
-#include <zarchive/zarchivereader.h>
-#include <zarchive/zarchivewriter.h>
-
 #include <algorithm>
 #include <memory>
 #include <vector>
@@ -16,18 +13,16 @@ namespace TitleConverter
 	namespace
 	{
 		// Everything the writer needs while it runs. The archive is written
-		// through two callbacks, which is why the state lives in a struct
-		// rather than in locals.
+		// through a callback, which is why the state lives in a struct rather
+		// than in locals.
 		struct WriterContext
 		{
-			fs::path outputPath;
 			// Through the frontend's file system, not the OS's: a destination
 			// the host application authorised - a SAF tree on Android - is not
 			// a path open() would take. VFSFileStream falls back to the native
 			// file when there is no frontend to ask.
 			VFSFileStream* fs{nullptr};
-			ZArchiveWriter* zaWriter{nullptr};
-			bool isValid{false};
+			zar_writer_t* zaWriter{nullptr};
 
 			const std::atomic_bool* cancel{nullptr};
 			std::function<void(const Progress&)> onProgress;
@@ -37,7 +32,7 @@ namespace TitleConverter
 			~WriterContext()
 			{
 				delete fs;
-				delete zaWriter;
+				zar_writer_free(zaWriter);
 			}
 
 			bool Cancelled() const { return cancel && cancel->load(); }
@@ -48,19 +43,19 @@ namespace TitleConverter
 					onProgress(progress);
 			}
 
-			static void NewOutputFile(const int32_t partIndex, void* _ctx)
+			static int WriteOutputData(void* _ctx, const void* data, size_t length)
 			{
 				WriterContext* ctx = (WriterContext*)_ctx;
-				ctx->fs = VFSFileStream::createFile2(ctx->outputPath);
-				if (!ctx->fs)
-					ctx->isValid = false;
-			}
-
-			static void WriteOutputData(const void* data, size_t length, void* _ctx)
-			{
-				WriterContext* ctx = (WriterContext*)_ctx;
-				if (ctx->fs)
-					ctx->fs->writeData(data, length);
+				const uint8* p = (const uint8*)data;
+				while (length)
+				{
+					const sint32 chunk = (sint32)std::min<size_t>(length, 0x40000000);
+					if (!ctx->fs || ctx->fs->writeData(p, chunk) != chunk)
+						return 0;
+					p += chunk;
+					length -= chunk;
+				}
+				return 1;
 			}
 
 			bool RecursivelyCountFiles(const std::string& fscPath)
@@ -97,13 +92,15 @@ namespace TitleConverter
 					return false;
 				if (Cancelled())
 					return false;
-				zaWriter->MakeDir(archivePath.c_str(), false);
+				if (zar_writer_dir(zaWriter, archivePath.c_str()) != ZAR_OK)
+					return false;
 				FSCDirEntry dirEntry;
 				while (fsc_nextDir(vfDir.get(), &dirEntry))
 				{
 					if (dirEntry.isFile)
 					{
-						zaWriter->StartNewFile((archivePath + dirEntry.path).c_str());
+						if (zar_writer_file(zaWriter, (archivePath + dirEntry.path).c_str()) != ZAR_OK)
+							return false;
 						std::unique_ptr<FSCVirtualFile> vFile(fsc_open((fscPath + dirEntry.path).c_str(),
 							FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &fscStatus));
 						if (!vFile)
@@ -114,7 +111,8 @@ namespace TitleConverter
 							uint32 readBytes = vFile->fscReadData(transferBuffer.data(), transferBuffer.size());
 							if (readBytes == 0)
 								break;
-							zaWriter->AppendData(transferBuffer.data(), readBytes);
+							if (zar_writer_append(zaWriter, transferBuffer.data(), readBytes) != ZAR_OK)
+								return false;
 							if (Cancelled())
 								return false;
 							progress.bytesDone += readBytes;
@@ -415,12 +413,13 @@ namespace TitleConverter
 		bool ok = false;
 		{
 			WriterContext ctx;
-			ctx.outputPath = outputPathTmp;
 			ctx.cancel = &cancel;
 			ctx.onProgress = onProgress;
-			ctx.isValid = true;
-			ctx.zaWriter = new ZArchiveWriter(&WriterContext::NewOutputFile, &WriterContext::WriteOutputData, &ctx);
-			if (!ctx.isValid)
+			ctx.fs = VFSFileStream::createFile2(outputPathTmp);
+			// level 6, as the reference writer compresses
+			if (ctx.fs)
+				ctx.zaWriter = zar_writer_new(&WriterContext::WriteOutputData, &ctx, 6);
+			if (!ctx.zaWriter)
 			{
 				error = "could not create the output file";
 				VFSFileStream::Remove(outputPathTmp);
@@ -429,24 +428,29 @@ namespace TitleConverter
 
 			if (!ctx.AddTitles(titles))
 			{
-				error = cancel.load() ? "cancelled" : "could not read the title";
+				error = cancel.load() ? "cancelled" : "could not copy the title into the archive";
 				delete ctx.fs;
 				ctx.fs = nullptr;
 				VFSFileStream::Remove(outputPathTmp);
 				return false;
 			}
 
-			ctx.zaWriter->Finalize();
+			ok = zar_writer_finish(ctx.zaWriter) == ZAR_OK;
 			delete ctx.fs;
 			ctx.fs = nullptr;
-			ok = true;
+			if (!ok)
+			{
+				error = "could not write the archive";
+				VFSFileStream::Remove(outputPathTmp);
+				return false;
+			}
 		}
 
 		if (!ok)
 			return false;
 
 		// The archive has to be readable back, or it is not worth keeping.
-		std::unique_ptr<ZArchiveReader> reader(ZArchive_OpenFromPath(outputPathTmp));
+		std::unique_ptr<ZArchive> reader(ZArchive::Open(outputPathTmp));
 		if (!reader)
 		{
 			error = "the archive could not be read back";
@@ -478,16 +482,16 @@ std::vector<TitleInfo> TitleConverter::TitlesInContent(const fs::path& path)
 	std::vector<TitleInfo> titles;
 	if (path.has_extension() && boost::iequals(_pathToUtf8(path.extension()), ".wua"))
 	{
-		std::unique_ptr<ZArchiveReader> zar(ZArchive_OpenFromPath(path));
+		std::unique_ptr<ZArchive> zar(ZArchive::Open(path));
 		if (!zar)
 			return titles;
-		const ZArchiveNodeHandle rootDir = zar->LookUp("", false, true);
-		for (uint32 i = 0; rootDir != ZARCHIVE_INVALID_NODE && i < zar->GetDirEntryCount(rootDir); i++)
+		std::vector<ZArchive::DirEntry> rootDir;
+		zar->ListDir("", rootDir);
+		for (const ZArchive::DirEntry& dirEntry : rootDir)
 		{
-			ZArchiveReader::DirEntry dirEntry;
 			TitleId parsedId;
 			uint16 parsedVersion;
-			if (!zar->GetDirEntry(rootDir, i, dirEntry) || !dirEntry.isDirectory ||
+			if (!dirEntry.node.dir ||
 				!TitleInfo::ParseWuaTitleFolderName(dirEntry.name, parsedId, parsedVersion))
 				continue;
 			TitleInfo title(path, dirEntry.name);

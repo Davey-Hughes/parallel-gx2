@@ -5,8 +5,8 @@ name: Build libretro core
 # can be assembled from them. The dependencies are submodules built with
 # the core, so a job installs no libraries at all - not even GL or X11
 # headers, as the context, surface and swapchain are the frontend's. Also
-# runs the network layer's, the OpenGL GPU cothread's and the thread
-# handoffs' tests.
+# runs the network layer's, the OpenGL GPU cothread's, the thread
+# handoffs' and the Wii U archive reader's tests.
 
 on:
   push:
@@ -110,6 +110,18 @@ jobs:
           SANITIZER=thread ./test/handoff/run_tests.sh
           make -C test/handoff clean
           SANITIZER=address,undefined ./test/handoff/run_tests.sh
+
+      - name: "Wii U archives"
+        # the core's .wua reader over libretro-common's zar, against archives
+        # zar's writer makes: plain, under ThreadSanitizer, under ASan + UBSan.
+        # The core's precompiled header wants fmt and glm.
+        run: |
+          git submodule update --init --depth 1 dependencies/fmt dependencies/glm
+          ./test/zarchive/run_tests.sh
+          make -C test/zarchive clean
+          SANITIZER=thread ./test/zarchive/run_tests.sh
+          make -C test/zarchive clean
+          SANITIZER=address,undefined ./test/zarchive/run_tests.sh
 
   macos:
     if: github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || contains(inputs.platforms, 'macos')

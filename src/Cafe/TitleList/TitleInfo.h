@@ -290,7 +290,7 @@ private:
 	// mounting info
 	std::vector<std::pair<sint32, std::string>> m_mountpoints;
 	class FSTVolume* m_wudVolume{};
-	class ZArchiveReader* m_zarchive{};
+	class ZArchive* m_zarchive{};
 	class WUHBReader* m_wuhbreader{};
 	// xml info
 	bool m_hasParsedXmlFiles{ false };

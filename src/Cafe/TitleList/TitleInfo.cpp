@@ -5,7 +5,6 @@
 #include "pugixml.hpp"
 #include "Common/FileStream.h"
 #include "Common/VFSFileStream.h"
-#include <zarchive/zarchivereader.h>
 #include "Cafe/Filesystem/ZArchiveVFS.h"
 #include "util/IniParser/IniParser.h"
 #include "util/crypto/crc32.h"
@@ -224,17 +223,14 @@ bool TitleInfo::DetectFormat(const fs::path& path, fs::path& pathOut, TitleDataF
 			pathOut = path;
 			// a Wii U archive file can contain multiple titles but TitleInfo only maps to one
 			// we use the first base title that we find. This is the most intuitive behavior when someone launches "game.wua"
-			ZArchiveReader* zar = ZArchive_OpenFromPath(path);
-			if (!zar)
+			std::unique_ptr<ZArchive> zar(ZArchive::Open(path));
+			std::vector<ZArchive::DirEntry> rootDir;
+			if (!zar || !zar->ListDir("", rootDir))
 				return false;
-			ZArchiveNodeHandle rootDir = zar->LookUp("", false, true);
 			bool foundBase = false;
-			for (uint32 i = 0; i < zar->GetDirEntryCount(rootDir); i++)
+			for (const ZArchive::DirEntry& dirEntry : rootDir)
 			{
-				ZArchiveReader::DirEntry dirEntry;
-				if (!zar->GetDirEntry(rootDir, i, dirEntry))
-					continue;
-				if (!dirEntry.isDirectory)
+				if (!dirEntry.node.dir)
 					continue;
 				TitleId parsedId;
 				uint16 parsedVersion;
@@ -250,7 +246,6 @@ bool TitleInfo::DetectFormat(const fs::path& path, fs::path& pathOut, TitleDataF
 					break;
 				}
 			}
-			delete zar;
 			return foundBase;
 		}
 		else if (boost::iends_with(filenameStr, ".wuhb"))
@@ -358,9 +353,9 @@ void TitleInfo::SetInvalidReason(InvalidReason reason)
 }
 
 std::mutex sZArchivePoolMtx;
-std::map<fs::path, std::pair<uint32, ZArchiveReader*>> sZArchivePool;
+std::map<fs::path, std::pair<uint32, ZArchive*>> sZArchivePool;
 
-ZArchiveReader* _ZArchivePool_AcquireInstance(const fs::path& path)
+ZArchive* _ZArchivePool_AcquireInstance(const fs::path& path)
 {
 	std::unique_lock _lock(sZArchivePoolMtx);
 	auto it = sZArchivePool.find(path);
@@ -371,7 +366,7 @@ ZArchiveReader* _ZArchivePool_AcquireInstance(const fs::path& path)
 	}
 	_lock.unlock();
 	// opening wua files can be expensive, so we do it outside of the lock
-	ZArchiveReader* zar = ZArchive_OpenFromPath(path);
+	ZArchive* zar = ZArchive::Open(path);
 	if (!zar)
 		return nullptr;
 	_lock.lock();
@@ -390,7 +385,7 @@ ZArchiveReader* _ZArchivePool_AcquireInstance(const fs::path& path)
 	return zar;
 }
 
-void _ZArchivePool_ReleaseInstance(const fs::path& path, ZArchiveReader* zar)
+void _ZArchivePool_ReleaseInstance(const fs::path& path, ZArchive* zar)
 {
 	std::unique_lock _lock(sZArchivePoolMtx);
 	auto it = sZArchivePool.find(path);

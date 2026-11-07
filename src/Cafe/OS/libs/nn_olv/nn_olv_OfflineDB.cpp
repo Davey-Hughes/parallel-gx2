@@ -7,7 +7,6 @@
 #include "Cafe/CafeSystem.h"
 #include <pugixml.hpp>
 #include <zlib.h>
-#include <zarchive/zarchivereader.h>
 #include "Cafe/Filesystem/ZArchiveVFS.h"
 
 namespace nn
@@ -16,7 +15,7 @@ namespace nn
 	{
 		std::mutex g_offlineDBMutex;
 		bool g_offlineDBInitialized = false;
-		ZArchiveReader* g_offlineDBArchive{nullptr};
+		ZArchive* g_offlineDBArchive{nullptr};
 
 		void OfflineDB_LazyInit()
 		{
@@ -24,7 +23,7 @@ namespace nn
 			if(g_offlineDBInitialized)
 				return;
 			// open archive
-			g_offlineDBArchive = ZArchive_OpenFromPath(ActiveSettings::GetUserDataPath("resources/miiverse/OfflineDB.zar"));
+			g_offlineDBArchive = ZArchive::Open(ActiveSettings::GetUserDataPath("resources/miiverse/OfflineDB.zar"));
 			if(!g_offlineDBArchive)
 				cemuLog_log(LogType::Force, "Offline miiverse posts are not available");
 			g_offlineDBInitialized = true;
@@ -36,6 +35,7 @@ namespace nn
 			if(!g_offlineDBInitialized)
 				return;
 			delete g_offlineDBArchive;
+			g_offlineDBArchive = nullptr;
 			g_offlineDBInitialized = false;
 		}
 
@@ -43,11 +43,11 @@ namespace nn
 		{
 			if(!g_offlineDBArchive)
 				return false;
-			ZArchiveNodeHandle fileHandle = g_offlineDBArchive->LookUp(filePath);
-			if (!g_offlineDBArchive->IsFile(fileHandle))
+			const std::optional<ZArchive::Node> file = g_offlineDBArchive->LookUp(filePath);
+			if (!file || file->dir)
 				return false;
 			if(fileSize)
-				*fileSize = g_offlineDBArchive->GetFileSize(fileHandle);
+				*fileSize = (uint32)file->size;
 			return true;
 		}
 
@@ -56,12 +56,11 @@ namespace nn
 			fileData.clear();
 			if(!g_offlineDBArchive)
 				return false;
-			ZArchiveNodeHandle fileHandle = g_offlineDBArchive->LookUp(filePath);
-			if (!g_offlineDBArchive->IsFile(fileHandle))
+			const std::optional<ZArchive::Node> file = g_offlineDBArchive->LookUp(filePath);
+			if (!file || file->dir)
 				return false;
-			fileData.resize(g_offlineDBArchive->GetFileSize(fileHandle));
-			g_offlineDBArchive->ReadFromFile(fileHandle, 0, fileData.size(), fileData.data());
-			return true;
+			fileData.resize(file->size);
+			return ZArchiveFile(*g_offlineDBArchive, *file).Read(0, fileData.data(), fileData.size()) == fileData.size();
 		}
 
 		void TryLoadCompressedMemoImage(DownloadedPostData& downloadedPostData)

@@ -84,7 +84,6 @@
 #include "LibretroAudioAPI.h"
 #include "libretro_addon_titles.h"
 #include "Cafe/Filesystem/ZArchiveVFS.h"
-#include <zarchive/zarchivereader.h>
 
 #include "Cafe/HW/MMU/MMU.h"
 #include "LibretroVkQueue.h"
@@ -2191,15 +2190,14 @@ static void libretro_collect_wua_destinations(bool force = false)
 		// What this .wua itself holds, by title id and version: its title
 		// folders, read from the archive, as the title list reads them
 		std::map<TitleId, uint16> inWua;
-		if (std::unique_ptr<ZArchiveReader> zar{ZArchive_OpenFromPath(contentPath)})
+		std::vector<ZArchive::DirEntry> root;
+		if (std::unique_ptr<ZArchive> zar{ZArchive::Open(contentPath)}; zar && zar->ListDir("", root))
 		{
-			const ZArchiveNodeHandle root = zar->LookUp("", false, true);
-			for (uint32 i = 0; root != ZARCHIVE_INVALID_NODE && i < zar->GetDirEntryCount(root); i++)
+			for (const ZArchive::DirEntry& entry : root)
 			{
-				ZArchiveReader::DirEntry entry;
 				TitleId id;
 				uint16 version;
-				if (zar->GetDirEntry(root, i, entry) && entry.isDirectory &&
+				if (entry.node.dir &&
 					TitleInfo::ParseWuaTitleFolderName(entry.name, id, version))
 					inWua[id] = std::max(inWua[id], version);
 			}

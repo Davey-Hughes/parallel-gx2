@@ -79,6 +79,7 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/Filesystem/fscDeviceHostFS.cpp \
 	$(CORE_DIR)/src/Cafe/Filesystem/fscDeviceRedirect.cpp \
 	$(CORE_DIR)/src/Cafe/Filesystem/fscDeviceWua.cpp \
+	$(CORE_DIR)/src/Cafe/Filesystem/ZArchiveVFS.cpp \
 	$(CORE_DIR)/src/Cafe/Filesystem/fscDeviceWud.cpp \
 	$(CORE_DIR)/src/Cafe/Filesystem/fscDeviceWuhb.cpp \
 	$(CORE_DIR)/src/Cafe/GamePatch.cpp \
@@ -497,7 +498,7 @@ CORE_FLAGS := -DENABLE_LIBRETRO -DRETRO_CORE -DVK_NO_PROTOTYPES \
 	-I$(SRC_DIR) -I$(SRC_DIR)/Cafe -I$(SRC_DIR)/Common -I$(SRC_DIR)/util -I$(SRC_DIR)/Cemu \
 	-I$(SRC_DIR)/input -I$(SRC_DIR)/config -I$(SRC_DIR)/audio -I$(SRC_DIR)/imgui \
 	-I$(SRC_DIR)/gui -I$(SRC_DIR)/gui/interface -I$(SRC_DIR)/libretro -I$(SRC_DIR)/resource \
-	-I$(DEP_DIR)/Vulkan-Headers/include -I$(DEP_DIR)/ZArchive/include \
+	-I$(DEP_DIR)/Vulkan-Headers/include \
 	-I$(DEP_DIR)/imgui -I$(DEP_DIR)/glm -I$(DEP_DIR)/fmt/include \
 	-I$(DEP_DIR)/pugixml/src -I$(DEP_DIR)/zlib -I$(DEP_DIR)/zstd/lib \
 	-I$(GLSLANG_DIR) -I$(GLSLANG_GEN_DIR) -I$(DEP_DIR)/boost-compat \
@@ -567,11 +568,15 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/crypto/pk.c \
 	$(LRC_DIR)/crypto/x509.c \
 	$(LRC_DIR)/encodings/encoding_base64.c \
+	$(LRC_DIR)/encodings/encoding_rzstd.c \
 	$(LRC_DIR)/encodings/encoding_utf.c \
+	$(LRC_DIR)/encodings/encoding_xxh64.c \
 	$(LRC_DIR)/features/features_cpu.c \
 	$(LRC_DIR)/file/file_path.c \
 	$(LRC_DIR)/file/file_path_io.c \
 	$(LRC_DIR)/file/retro_dirent.c \
+	$(LRC_DIR)/formats/zar/zar.c \
+	$(LRC_DIR)/formats/zar/zar_write.c \
 	$(LRC_DIR)/hash/lrc_hash.c \
 	$(LRC_DIR)/lists/string_list.c \
 	$(LRC_DIR)/net/net_compat.c \
@@ -587,7 +592,7 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/time/rtime.c \
 	$(LRC_DIR)/utils/md5.c \
 	$(LRC_DIR)/vfs/vfs_implementation.c
-LRC_FLAGS := -I$(LRC_DIR)/include -DHAVE_SSL -DHAVE_RETROSSL -DHAVE_CRYPTO -DHAVE_THREADS
+LRC_FLAGS := -I$(LRC_DIR)/include -DHAVE_SSL -DHAVE_RETROSSL -DHAVE_CRYPTO -DHAVE_THREADS -DHAVE_RZSTD
 # libco: Android's fibers (FiberAndroid.cpp), and the OpenGL GPU, which runs as
 # a cothread of the frontend's thread because the frontend's context is current
 # there and nowhere else (LatteThread.cpp). Per-thread state (LIBCO_MP): more
@@ -627,10 +632,6 @@ else
    IH264D_FLAGS += -DARMV8 -I$(IH264D_DIR)/common/armv8 -I$(IH264D_DIR)/decoder/arm
 endif
 IH264D_ASFLAGS := -I$(IH264D_DIR)/common/armv8
-
-ZARCHIVE_SOURCES_C := $(DEP_DIR)/ZArchive/src/sha_256.c
-ZARCHIVE_SOURCES_CXX := $(DEP_DIR)/ZArchive/src/zarchivereader.cpp $(DEP_DIR)/ZArchive/src/zarchivewriter.cpp
-ZARCHIVE_FLAGS := -I$(DEP_DIR)/ZArchive/include -I$(DEP_DIR)/zstd/lib -w
 
 IMGUI_SOURCES_CXX := $(addprefix $(DEP_DIR)/imgui/,imgui.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp)
 IMGUI_FLAGS := -I$(DEP_DIR)/imgui -w
@@ -698,7 +699,7 @@ LIBUSB_FLAGS := -I$(DEP_DIR)/libusb-config -I$(LIBUSB_DIR) -w
 XBYAK_SOURCES_CXX := $(DEP_DIR)/xbyak_aarch64/src/xbyak_aarch64_impl.cpp $(DEP_DIR)/xbyak_aarch64/src/util_impl.cpp
 XBYAK_FLAGS := -I$(DEP_DIR)/xbyak_aarch64 -I$(DEP_DIR)/xbyak_aarch64/xbyak_aarch64 -w
 
-LIB_GROUPS := CORE CURLCOMPAT LRC IH264D ZARCHIVE IMGUI GLSLANG FMT PUGIXML ZLIB ZSTD
+LIB_GROUPS := CORE CURLCOMPAT LRC IH264D IMGUI GLSLANG FMT PUGIXML ZLIB ZSTD
 ifeq ($(HAVE_LIBUSB),1)
    LIB_GROUPS += LIBUSB
 endif

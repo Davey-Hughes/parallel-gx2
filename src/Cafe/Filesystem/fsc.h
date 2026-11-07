@@ -212,7 +212,7 @@ bool fsc_doesDirectoryExist(const char* path, sint32 maxPriority = FSC_PRIORITY_
 bool FSCDeviceWUD_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class FSTVolume* mountedVolume, sint32 priority);
 
 // wua device
-bool FSCDeviceWUA_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class ZArchiveReader* archive, sint32 priority);
+bool FSCDeviceWUA_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class ZArchive* archive, sint32 priority);
 
 // wuhb device
 bool FSCDeviceWUHB_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class WUHBReader* wuhbReader, sint32 priority);

@@ -199,6 +199,24 @@ test-handoff:
     - make -C test/handoff clean
     - SANITIZER=address,undefined ./test/handoff/run_tests.sh
 
+# The core's Wii U archive reader over libretro-common's zar, against archives
+# zar's writer makes. The core's precompiled header wants fmt and glm.
+test-zarchive:
+  stage: test
+  image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
+  needs: []
+  variables:
+    GIT_SUBMODULE_STRATEGY: normal
+    GIT_SUBMODULE_PATHS: dependencies/fmt dependencies/glm
+    CC: gcc-12
+    CXX: g++-12
+  script:
+    - ./test/zarchive/run_tests.sh
+    - make -C test/zarchive clean
+    - SANITIZER=thread ./test/zarchive/run_tests.sh
+    - make -C test/zarchive clean
+    - SANITIZER=address,undefined ./test/zarchive/run_tests.sh
+
 # No X11/XCB/Wayland/GL/EGL header, VK_USE_PLATFORM_* or platform surface
 # entry point in the core: the frontend owns the context and the surface.
 test-no-wsi:
