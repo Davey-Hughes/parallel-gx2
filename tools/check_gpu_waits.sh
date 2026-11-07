@@ -12,6 +12,12 @@
 # RetroArch's audio thread, pulling from an empty ring (Audio Thread), sleeps
 # until AX feeds it, not a fixed millisecond.
 #
+# And the waits around the title list and the IOSU: the title scan the load
+# waits for (100 ms polls), the ioctl workers' shutdown (1 ms), the boss
+# daemon with nothing to run (100 ms), its stop (1 ms) and the task waits
+# games make (100 ms each), and nim's waits for the accounts and its package
+# list (500 and 200 ms) - all asleep on an EventWake until notified.
+#
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
 # the clock. Each of them used to check every 1 to 50 ms, and the boot paid for
@@ -76,6 +82,23 @@ check src/libretro/CemuLibretro.cpp '^static void libretro_gpu_wait_until\(' Lat
 check src/libretro/CemuLibretro.cpp 'static void RETRO_CALLCONV libretro_audio_thread_pull\(\)' WaitForFeed
 check src/libretro/CemuLibretro.cpp 'static void RETRO_CALLCONV libretro_audio_thread_state\(' WakeFeedWaiter
 check src/libretro/LibretroAudioAPI.cpp '^void LibretroAudioAPI::WaitForFeed\(' WaitUntil
+check src/Cafe/TitleList/TitleList.cpp '^void CafeTitleList::WaitForScan\(\)' 'sTLScanDone->WaitUntil'
+check src/Cafe/TitleList/TitleList.cpp '^void CafeTitleList::WaitForMandatoryScan\(\)' WaitForScan
+check src/libretro/CemuLibretro.cpp '^static void libretro_rescan_titles\(\)' WaitForScan
+check src/Cafe/IOSU/legacy/iosu_ioctl.cpp '^bool iosuIoctl_waitForWorkersToStop\(' 'sIoctlWorkersStopped->WaitUntil'
+check src/Cafe/IOSU/legacy/iosu_ioctl.cpp '^IosuIoctlWorkerScope::~IosuIoctlWorkerScope\(\)' 'sIoctlWorkersStopped->Notify'
+check src/Cafe/IOSU/legacy/iosu_nim.cpp 'void iosuNim_waitUntilPackageListReady\(\)' 'sNimPackageListReady->WaitUntil'
+check src/Cafe/IOSU/legacy/iosu_nim.cpp 'void nim_backgroundThread\(\)' iosuAct_waitForAccountData
+check src/Cafe/IOSU/legacy/iosu_act.cpp '^void iosuAct_loadAccounts\(\)' 'sActAccountDataLoaded->Notify'
+check src/Cafe/IOSU/nn/boss/boss_service.cpp 'void BossDaemonThread\(\)' 'BossWake().WaitUntil'
+check src/Cafe/IOSU/nn/boss/boss_service.cpp 'void Stop\(\)' 'BossWake().WaitUntil'
+check src/Cafe/IOSU/nn/boss/boss_service.cpp 'void SetStateLocked\(' 'BossWake().Notify'
+if pp src/Cafe/IOSU/nn/boss/boss_service.cpp | grep -q 'sleep_for'; then
+	echo "boss_service.cpp still sleeps by the clock"; fail=1
+fi
+if pp src/Cafe/IOSU/nn/boss/boss_service.cpp | grep -q 'm_taskState = TaskState::'; then
+	echo "boss_service.cpp: a task changes state without notifying"; fail=1
+fi
 if pp src/libretro/CemuLibretro.cpp | grep -q 'libretro_gpu_wait_step'; then
 	echo "CemuLibretro.cpp: a GPU wait still steps a millisecond at a time"; fail=1
 fi
@@ -115,5 +138,5 @@ if ! body src/Cafe/OS/libs/TCL/TCL.cpp 'int TCLSubmitToRing\(' | grep -q LatteGp
 	echo "TCLSubmitToRing does not wake the GPU thread"; fail=1
 fi
 
-[ $fail -eq 0 ] && echo "GPU idle and boot waits sleep until woken, none by the clock or spinning"
+[ $fail -eq 0 ] && echo "GPU, boot, title scan and IOSU waits sleep until woken, none by the clock or spinning"
 exit $fail

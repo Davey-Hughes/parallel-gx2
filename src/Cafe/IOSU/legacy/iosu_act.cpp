@@ -10,6 +10,7 @@
 #include "Cafe/Account/Account.h"
 #include "config/ActiveSettings.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/EventWake.h"
 
 #include "Cemu/napi/napi.h"
 #include "Cemu/ncrypto/ncrypto.h"
@@ -63,7 +64,10 @@ struct actAccountData_t
 #define IOSU_ACT_ACCOUNT_MAX_COUNT (0xC)
 
 actAccountData_t _actAccountData[IOSU_ACT_ACCOUNT_MAX_COUNT] = {};
-bool _actAccountDataInitialized = false;
+std::atomic_bool _actAccountDataInitialized{false};
+// What iosuAct_waitForAccountData sleeps on; loading the accounts notifies.
+// Never destroyed, as the threads that wait are detached.
+static ImmortalEventWake sActAccountDataLoaded;
 
 void FillAccountData(const Account& account, const bool online_enabled, int index)
 {
@@ -127,6 +131,7 @@ void iosuAct_loadAccounts()
 	cemuLog_log(LogType::Force, "IOSU_ACT: using account {} in first slot", boost::nowide::narrow(first_acc.GetMiiName()));
 	
 	_actAccountDataInitialized = true;
+	sActAccountDataLoaded->Notify();
 }
 
 void iosuAct_forgetAccounts()
@@ -137,6 +142,11 @@ void iosuAct_forgetAccounts()
 bool iosuAct_isAccountDataLoaded()
 {
 	return _actAccountDataInitialized;
+}
+
+void iosuAct_waitForAccountData()
+{
+	sActAccountDataLoaded->WaitUntil([] { return _actAccountDataInitialized.load(); });
 }
 
 uint32 iosuAct_acquirePrincipalIdByAccountId(const char* nnid, uint32* pid)

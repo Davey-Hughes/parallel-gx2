@@ -29,6 +29,7 @@ public:
 	static void Refresh(); // scan all paths
 	static bool IsScanning(); // returns true if async refresh is currently active
 	static void WaitForMandatoryScan(); // wait for current scan result if no cached info is available
+	static void WaitForScan(); // wait for the scan that is running, if any
 	static void Shutdown(); // join the refresh worker, so nothing outlives the library
 	static void AddTitleFromPath(fs::path path);
 

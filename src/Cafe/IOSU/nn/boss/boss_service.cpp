@@ -1,5 +1,6 @@
 #include "Cafe/OS/libs/nn_common.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/EventWake.h"
 
 #include "Cafe/IOSU/iosu_types_common.h"
 #include "Cafe/IOSU/nn/iosu_nn_service.h"
@@ -24,6 +25,17 @@
 namespace iosu::boss
 {
 	using namespace ::nn::boss;
+
+	// What the daemon and the waits on tasks sleep on instead of checking every
+	// 10 or 100 ms: a task changing state and the daemon starting, stopping
+	// and leaving all notify, and each waiter has its own predicate. Never
+	// destroyed - a daemon busy in a request when the title closes is
+	// detached (BossDaemon::Stop), and may still be leaving at exit.
+	static EventWake& BossWake()
+	{
+		static ImmortalEventWake s_wake;
+		return s_wake.Get();
+	}
 
 	static constexpr nnResult RESULT_SUCCESS = 0x200080;
 	static constexpr nnResult RESULT_C0203880 = 0xC0203880;
@@ -332,8 +344,15 @@ namespace iosu::boss
 			std::unique_lock _l(m_mutex);
 			cemu_assert_debug(m_taskState == TaskState::Initial || m_taskState == TaskState::Done);
 			m_taskTurnState = TaskTurnState::Ready;
-			m_taskState = TaskState::Ready;
+			SetStateLocked(TaskState::Ready);
 			return RESULT_SUCCESS;
+		}
+
+		// with m_mutex held, as every change of state is
+		void SetStateLocked(TaskState state)
+		{
+			m_taskState = state;
+			BossWake().Notify(); // the daemon, and HandleTaskWait
 		}
 
 		TaskState GetState()
@@ -371,13 +390,13 @@ namespace iosu::boss
 				cemuLog_log(LogType::Force, "Task {} is not ready to run, current state: {}", m_taskId.id.c_str(), static_cast<uint32>(m_taskState));
 				return BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
 			}
-			m_taskState = TaskState::Running;
+			SetStateLocked(TaskState::Running);
 			m_taskTurnState = TaskTurnState::Running;
 			m_contentLength = 0;
 			_l.unlock();
 			if (!ActiveSettings::IsOnlineEnabled())
 			{
-				m_taskState = TaskState::Done;
+				SetStateLocked(TaskState::Done);
 				m_taskTurnState = TaskTurnState::DoneError;
 				return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
 			}
@@ -453,7 +472,7 @@ namespace iosu::boss
 				cemu_assert_unimplemented();
 				cemuLog_logDebug(LogType::Force, "IOSU-BOSS: Unsupported task type: {}", static_cast<uint32>(m_taskSettings.taskType.value()));
 				_l.lock();
-				m_taskState = TaskState::Done;
+				SetStateLocked(TaskState::Done);
 				m_taskTurnState = TaskTurnState::DoneError;
 				m_contentLength = 0;
 				m_httpStatusCode = 0;
@@ -470,7 +489,7 @@ namespace iosu::boss
 			{
 				cemuLog_logDebug(LogType::Force, "IOSU-BOSS: PlayReport tasks are not implemented yet");
 				_l.lock();
-				m_taskState = TaskState::Done;
+				SetStateLocked(TaskState::Done);
 				m_taskTurnState = TaskTurnState::DoneError;
 				m_contentLength = 0;
 				m_httpStatusCode = 200;
@@ -480,7 +499,7 @@ namespace iosu::boss
 			{
 				cemuLog_logDebug(LogType::Force, "IOSU-BOSS: Unknown task type: {}", static_cast<uint32>(m_taskSettings.taskType.value()));
 				_l.lock();
-				m_taskState = TaskState::Done;
+				SetStateLocked(TaskState::Done);
 				m_taskTurnState = TaskTurnState::DoneError;
 				m_contentLength = 0;
 				m_httpStatusCode = 0;
@@ -502,7 +521,7 @@ namespace iosu::boss
 			{
 				cemuLog_log(LogType::Force, fmt::format("Failed BOSS request"));
 				_l.lock();
-				m_taskState = TaskState::Done;
+				SetStateLocked(TaskState::Done);
 				m_taskTurnState = TaskTurnState::DoneError;
 				return BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
 			}
@@ -519,7 +538,7 @@ namespace iosu::boss
 				if (httpStatusCode == 404)
 				{
 					_l.lock();
-					m_taskState = TaskState::Done;
+					SetStateLocked(TaskState::Done);
 					m_taskTurnState = TaskTurnState::DoneError;
 					cemuLog_logDebug(LogType::Force, "BOSS task_run: Received 404 Not Found for URL: {}", requestUrl);
 					return BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
@@ -543,7 +562,7 @@ namespace iosu::boss
 			}
 			{
 				_l.lock();
-				m_taskState = TaskState::Done;
+				SetStateLocked(TaskState::Done);
 				m_taskTurnState = TaskTurnState::DoneSuccess;
 			}
 			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
@@ -845,9 +864,11 @@ namespace iosu::boss
 			// is a shutdown that never finishes and a frontend that gives up on
 			// the core. Wait a moment for it to notice the flag, and let it
 			// finish on its own if it is busy.
+			// Asleep until it says it has left, not a millisecond at a time.
 			constexpr int kStopTimeoutMs = 2000;
-			for (int i = 0; i < kStopTimeoutMs && !m_threadExited.load(std::memory_order_acquire); i++)
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			BossWake().Notify(); // the daemon, asleep for want of a task
+			BossWake().WaitUntil([this] { return m_threadExited.load(std::memory_order_acquire); },
+				std::chrono::steady_clock::now() + std::chrono::milliseconds(kStopTimeoutMs));
 			if (m_threadExited.load(std::memory_order_acquire))
 				m_bossDaemonThread.join();
 			else
@@ -951,19 +972,31 @@ namespace iosu::boss
 			while ( m_threadRunning )
 			{
 				// check for tasks to run
+				std::shared_ptr<RegisteredTask> task = GetNextRunableTask();
+				if (task)
 				{
-					std::shared_ptr<RegisteredTask> task = GetNextRunableTask();
-					if (task)
-					{
-						task->TaskDoRequest(curl);
-						cemu_assert_debug(task->GetState() != TaskState::Ready);
-					}
+					task->TaskDoRequest(curl);
+					cemu_assert_debug(task->GetState() != TaskState::Ready);
+					// One left Ready would be picked again at once; upstream's
+					// pace of ten tries a second is the bound on that
+					if (task->GetState() == TaskState::Ready)
+						BossWake().WaitUntil([this] { return !m_threadRunning; },
+							std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+					continue;
 				}
-				for (int i = 0; i < 10 && m_threadRunning; i++)
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				// Nothing to run: asleep until a task is made ready (Run
+				// notifies) or the daemon is stopped, rather than checking
+				// ten times a second
+				BossWake().WaitUntil([this] { return !m_threadRunning || HasRunnableTask(); });
 			}
 			curl_easy_cleanup(curl);
 			m_threadExited.store(true, std::memory_order_release);
+			BossWake().Notify(); // Stop
+		}
+
+		bool HasRunnableTask()
+		{
+			return GetNextRunableTask() != nullptr;
 		}
 
 		std::shared_ptr<RegisteredTask> GetNextRunableTask()
@@ -1152,33 +1185,26 @@ namespace iosu::boss
 			cemu_assert_debug(registeredTask != nullptr);
 			if (!registeredTask)
 				return RESULT_NOTEXIST;
-			while (true)
+			if (waitState != TaskWaitState::Done)
 			{
-				// todo - make async
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-				TaskState currentState = registeredTask->GetState();
-				// does the state match the wait state?
-				if (waitState == TaskWaitState::Done)
-				{
-					if (currentState == TaskState::Done)
-					{
-						serviceCall.WriteResponse<uint8be>(1); // 0 -> timeout, 1 -> no timeout
-						return RESULT_SUCCESS;
-					}
-				}
-				else
-				{
-					cemuLog_log(LogType::Force, "IOSU-Boss: Unknown task wait state {}", static_cast<uint32>(waitState));
-					serviceCall.WriteResponse<uint8be>(0);
-					return RESULT_SUCCESS;
-				}
-				// check for timeout
-				if (timeout != 0 && std::chrono::steady_clock::now() >= endTime)
-				{
-					serviceCall.WriteResponse<uint8be>(0);
-					return RESULT_SUCCESS; // which error to return here?
-				}
+				cemuLog_log(LogType::Force, "IOSU-Boss: Unknown task wait state {}", static_cast<uint32>(waitState));
+				serviceCall.WriteResponse<uint8be>(0);
+				return RESULT_SUCCESS;
 			}
+			// Asleep until the task is done (its change of state notifies) or
+			// the timeout, rather than checking every 100 ms - which also made
+			// every wait, on a task already done, a tenth of a second at least
+			const auto done = [&registeredTask] { return registeredTask->GetState() == TaskState::Done; };
+			bool isDone;
+			if (timeout != 0)
+				isDone = BossWake().WaitUntil(done, endTime);
+			else
+			{
+				BossWake().WaitUntil(done);
+				isDone = true;
+			}
+			serviceCall.WriteResponse<uint8be>(isDone ? 1 : 0); // 0 -> timeout, 1 -> no timeout
+			return RESULT_SUCCESS; // which error to return on a timeout is unknown
 		}
 
 		nnResult HandleTaskGetTurnState(IPCServiceCall& serviceCall)

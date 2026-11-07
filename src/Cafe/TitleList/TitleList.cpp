@@ -1,5 +1,6 @@
 #include "TitleList.h"
 #include "Common/FileStream.h"
+#include "util/helpers/EventWake.h"
 
 #include "util/helpers/helpers.h"
 
@@ -25,6 +26,9 @@ std::thread sTLRefreshWorker;
 bool sTLRefreshWorkerActive{false};
 std::atomic_uint32_t sTLRefreshRequests{};
 std::atomic_bool sTLIsScanMandatory{ false };
+// What a wait for the scan sleeps on; the worker notifies as it finishes. Never
+// destroyed, as a worker that outlives a close is detached (Shutdown).
+static ImmortalEventWake sTLScanDone;
 
 // callback list
 struct TitleListCallbackEntry 
@@ -219,8 +223,15 @@ void CafeTitleList::WaitForMandatoryScan()
 {
 	if (!sTLIsScanMandatory)
 		return;
-	while (IsScanning())
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	WaitForScan();
+}
+
+// Asleep until the scan finishes rather than checking every 100 ms: on the way
+// to starting a title from a cold cache, that was up to a tenth of a second of
+// nothing on top of the scan
+void CafeTitleList::WaitForScan()
+{
+	sTLScanDone->WaitUntil([] { return !IsScanning(); });
 }
 
 void _RemoveTitleFromMultimap(TitleInfo* titleInfo)
@@ -339,6 +350,7 @@ bool CafeTitleList::RefreshWorkerThread()
 	for (auto& it : sTLCallbackList)
 		it.cb(&evt, it.ctx);
 	sTLMutex.unlock();
+	sTLScanDone->Notify(); // WaitForScan
 	if (sTLCacheDirty)
 	{
 		StoreCacheFile();

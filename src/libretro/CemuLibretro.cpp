@@ -4699,8 +4699,7 @@ static bool libretro_running_base_title(TitleId& runningBase);
 static void libretro_rescan_titles()
 {
 	CafeTitleList::Refresh();
-	while (CafeTitleList::IsScanning())
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	CafeTitleList::WaitForScan();
 }
 
 // Account names from a text file, as a core option cannot hold free text

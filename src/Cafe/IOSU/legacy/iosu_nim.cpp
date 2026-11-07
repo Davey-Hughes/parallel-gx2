@@ -5,6 +5,7 @@
 #include "util/crypto/aes128.h"
 #include "curl/curl.h"
 #include "util/helpers/helpers.h"
+#include "util/helpers/EventWake.h"
 #include "Cemu/napi/napi.h"
 #include "Cemu/ncrypto/ncrypto.h"
 #include "Cafe/CafeSystem.h"
@@ -40,9 +41,12 @@ namespace iosu
 			// nim packages
 			// note: Seems like scope.rpx expects the number of packages to never change after the initial GetNum call?
 			std::vector<NIMPackage> packages;
-			bool packageListReady;
+			std::atomic_bool packageListReady;
 			bool backgroundThreadStarted;
 		} g_nim = {};
+		// What iosuNim_waitUntilPackageListReady sleeps on; the background
+		// thread notifies. Never destroyed, as that thread is detached.
+		static ImmortalEventWake sNimPackageListReady;
 
 		bool nim_CheckDownloadsDisabled()
 		{
@@ -242,10 +246,8 @@ namespace iosu
 
 		void nim_backgroundThread()
 		{
-			while (iosuAct_isAccountDataLoaded() == false)
-			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(500));
-			}
+			// asleep until the accounts are loaded, not checked twice a second
+			iosuAct_waitForAccountData();
 
 			if (nim_getLatestVersion())
 			{
@@ -255,6 +257,7 @@ namespace iosu
 				}
 			}
 			g_nim.packageListReady = true;
+			sNimPackageListReady->Notify();
 		}
 
 		void iosuNim_waitUntilPackageListReady()
@@ -266,8 +269,8 @@ namespace iosu
 				t.detach();
 				g_nim.backgroundThreadStarted = true;
 			}
-			while (g_nim.packageListReady == false)
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			// asleep until it is, rather than checking five times a second
+			sNimPackageListReady->WaitUntil([] { return g_nim.packageListReady.load(); });
 		}
 
 

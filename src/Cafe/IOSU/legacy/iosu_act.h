@@ -122,6 +122,7 @@ struct iosuActCemuRequest_t
 uint32 iosuAct_getAccountIdOfCurrentAccount();
 
 bool iosuAct_isAccountDataLoaded();
+void iosuAct_waitForAccountData(); // asleep until iosuAct_loadAccounts has run
 // Drops the accounts read at the last title start, so the next one reads the
 // selected account again rather than keeping the first one for the process.
 void iosuAct_forgetAccounts();

@@ -4,6 +4,7 @@
 #include "util/helpers/ringbuffer.h"
 
 #include "util/helpers/Semaphore.h"
+#include "util/helpers/EventWake.h"
 
 #include <atomic>
 #include <thread>
@@ -66,6 +67,9 @@ bool iosuIoctl_hasWaiters()
 // has been woken but has not yet reached the end of its function is in neither
 // state. Stopping has to mean gone.
 static std::atomic<uint32> sIoctlWorkersRunning{0};
+// What the wait for them to stop sleeps on; the last one out notifies. Never
+// destroyed: these threads are detached and may be leaving as the process does.
+static ImmortalEventWake sIoctlWorkersStopped;
 
 IosuIoctlWorkerScope::IosuIoctlWorkerScope()
 {
@@ -74,7 +78,8 @@ IosuIoctlWorkerScope::IosuIoctlWorkerScope()
 
 IosuIoctlWorkerScope::~IosuIoctlWorkerScope()
 {
-	sIoctlWorkersRunning.fetch_sub(1, std::memory_order_acq_rel);
+	if (sIoctlWorkersRunning.fetch_sub(1, std::memory_order_acq_rel) == 1)
+		sIoctlWorkersStopped->Notify();
 }
 
 uint32 iosuIoctl_runningWorkerCount()
@@ -87,11 +92,14 @@ uint32 iosuIoctl_runningWorkerCount()
 // is a decision to leak them rather than to let them hold a shutdown up. So
 // this cannot be a join, and an unbounded version of it would hand the frontend
 // a hang in exchange for a worker that was never going to come back anyway.
+//
+// Asleep until the last of them leaves (it notifies) rather than a millisecond
+// at a time; the deadline only bounds it.
 bool iosuIoctl_waitForWorkersToStop(int timeoutMs)
 {
-	for (int i = 0; i < timeoutMs && sIoctlWorkersRunning.load(std::memory_order_acquire) != 0; i++)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	return sIoctlWorkersRunning.load(std::memory_order_acquire) == 0;
+	return sIoctlWorkersStopped->WaitUntil(
+		[] { return sIoctlWorkersRunning.load(std::memory_order_acquire) == 0; },
+		std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs));
 }
 
 // requestShutdown posts once per device to let each worker out, including the

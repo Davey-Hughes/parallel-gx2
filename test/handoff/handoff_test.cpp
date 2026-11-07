@@ -11,6 +11,11 @@
 //  - the GPU's command ring as LatteCP_readU32Deprc now waits on it: every word
 //    arrives, in order, and a consumer with nothing to read sleeps until a
 //    submission or its vsync deadline instead of spinning;
+//  - EventWake, the eventcount the title scan, the IOSU ioctl workers'
+//    shutdown, the boss daemon and its task waits, and nim's waits sleep on:
+//    the last of many workers out wakes the shutdown wait, a bounded wait
+//    comes back by its deadline, a daemon with nothing to run sleeps until a
+//    task is made ready or it is stopped;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -21,6 +26,7 @@
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompilerWorkQueue.h"
 #include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 #include "util/helpers/ThreadStartedFlag.h"
+#include "util/helpers/EventWake.h"
 #include "libretro/LibretroAudioRing.h"
 
 #include <atomic>
@@ -322,6 +328,84 @@ static void TestGpuRingIdleWait()
 		std::fprintf(stderr, "ring idle wait: %llu rounds for %d bursts\n", (unsigned long long)idleRounds, kBursts);
 }
 
+// --- EventWake ----------------------------------------------------------
+
+static void TestEventWake()
+{
+	using clock = std::chrono::steady_clock;
+	static ImmortalEventWake s_wake;
+	EventWake& wake = s_wake.Get();
+
+	// iosuIoctl_waitForWorkersToStop: the last worker out notifies, and the
+	// wait ends then - long before its deadline - however the exits interleave
+	for (int round = 0; round < 200; round++)
+	{
+		std::atomic<uint32_t> running{0};
+		std::atomic_bool go{false};
+		std::vector<std::thread> workers;
+		for (int i = 0; i < 8; i++)
+		{
+			running.fetch_add(1);
+			workers.emplace_back([&] {
+				while (!go.load(std::memory_order_acquire))
+					std::this_thread::yield();
+				if (running.fetch_sub(1, std::memory_order_acq_rel) == 1)
+					wake.Notify();
+			});
+		}
+		go.store(true, std::memory_order_release);
+		const auto start = clock::now();
+		const bool stopped = wake.WaitUntil([&] { return running.load(std::memory_order_acquire) == 0; },
+			start + std::chrono::seconds(30));
+		CHECK(stopped);
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+		for (auto& t : workers)
+			t.join();
+	}
+	// A deadline with nothing coming: false, after it
+	{
+		const auto start = clock::now();
+		CHECK(!wake.WaitUntil([] { return false; }, start + std::chrono::milliseconds(20)));
+		CHECK(clock::now() - start >= std::chrono::milliseconds(20));
+	}
+	// The boss daemon: asleep with nothing to run, a task made ready wakes it,
+	// a stop ends it - and the stop's own bounded wait for it to leave ends as
+	// it leaves
+	{
+		std::atomic_bool running{true}, exited{false};
+		std::atomic<int> ready{0}, ran{0};
+		std::thread daemon([&] {
+			while (running.load())
+			{
+				if (ready.load() > 0)
+				{
+					ready.fetch_sub(1);
+					ran.fetch_add(1);
+					wake.Notify(); // the task's state change
+					continue;
+				}
+				wake.WaitUntil([&] { return !running.load() || ready.load() > 0; });
+			}
+			exited.store(true, std::memory_order_release);
+			wake.Notify();
+		});
+		for (int i = 0; i < 100; i++)
+		{
+			ready.fetch_add(1);
+			wake.Notify();
+			const int want = i + 1;
+			wake.WaitUntil([&] { return ran.load() == want; }); // HandleTaskWait
+		}
+		running.store(false);
+		wake.Notify();
+		const auto start = clock::now();
+		CHECK(wake.WaitUntil([&] { return exited.load(std::memory_order_acquire); }, start + std::chrono::seconds(30)));
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+		daemon.join();
+		CHECK(ran.load() == 100);
+	}
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -531,6 +615,7 @@ int main()
 	TestGpuWakeBootHandoff();
 	TestGpuRingIdleWait();
 	TestThreadStartedFlag();
+	TestEventWake();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();
