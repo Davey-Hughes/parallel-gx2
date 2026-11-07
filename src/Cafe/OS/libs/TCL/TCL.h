@@ -20,6 +20,7 @@ namespace TCL
 
 	// called from Latte code
 	bool TCLGPUReadRBWord(uint32& cmdWord);
+	bool TCLGPUHasRBWord();
 	void TCLGPUNotifyNewRetirementTimestamp();
 
 	COSModule* GetModule();

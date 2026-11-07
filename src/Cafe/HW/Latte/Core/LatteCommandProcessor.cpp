@@ -10,6 +10,8 @@
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #include "Cafe/HW/Latte/Core/LattePM4.h"
 #include "Cafe/HW/Latte/Core/LatteSurfaceCopy.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
+#include "util/highresolutiontimer/HighResolutionTimer.h"
 
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/TCL/TCL.h" // TCL currently handles the GPU command ringbuffer
@@ -29,6 +31,7 @@ typedef uint32be* LatteCMDPtr;
 #define LatteSkipCMD(_nWords) cmd += (_nWords)
 
 void LatteThread_HandleOSScreen();
+bool LatteThread_IsOSScreenFlipPending();
 
 void LatteThread_Exit();
 
@@ -153,6 +156,32 @@ private:
 
 void LatteCP_processCommandBuffer(DrawPassContext& drawPassCtx);
 
+// The GPU thread with nothing to do, on a thread of its own: asleep until there
+// is - the CPU submits to the ring, queues an async command or flips an
+// OSScreen, the frontend asks for the pause gate, or the title stops (each of
+// which notifies LatteGpuWake) - or until the next timed vsync is due, which
+// is work of its own (LatteTiming_HandleTimedVsync). Upstream spins here,
+// which keeps a host core busy for as long as the emulated CPU takes to send
+// the next command; the eventcount still spins a little before it sleeps, so
+// a command that follows closely is picked up as quickly.
+static void LatteCP_waitForWork()
+{
+	const uint64 nowTick = HighResolutionTimer::now().getTick();
+	const uint64 nextVSync = LatteGPUState.timer_nextVSync;
+	if (nextVSync <= nowTick)
+		return;
+	const uint64 freq = HighResolutionTimer::getFrequency();
+	const uint64 ticks = nextVSync - nowTick;
+	// a vsync interval at most: a tick count from a timer that was reset is
+	// never a reason to sleep for longer
+	const uint64 us = std::min<uint64>(ticks / (freq / 1000000 ? freq / 1000000 : 1), 1000000 / 50);
+	LatteGpuWake_WaitUntil([] {
+		return TCL::TCLGPUHasRBWord() || !LatteAsyncCommands_isEmpty() ||
+			Latte_GetStopSignal() || Latte_IsGpuPauseRequested() ||
+			LatteThread_IsOSScreenFlipPending();
+	}, std::chrono::steady_clock::now() + std::chrono::microseconds(us));
+}
+
 // called whenever the GPU runs out of commands or hits a wait condition (semaphores, HLE waits)
 void LatteCP_signalEnterWait()
 {
@@ -199,7 +228,10 @@ uint32 LatteCP_readU32Deprc()
 		// still no command data available, do some other tasks
 		LatteTiming_HandleTimedVsync();
 		LatteAsyncCommands_checkAndExecute();
-		Latte_GpuYield(LatteGpuYield::Idle); // a cothread hands the frontend's thread back
+		if (Latte_IsOnGpuCothread())
+			Latte_GpuYield(LatteGpuYield::Idle); // a cothread hands the frontend's thread back
+		else
+			LatteCP_waitForWork();
 		performanceMonitor.gpuTime_idleTime.endMeasuring();
 	}
 	UNREACHABLE;

@@ -3,6 +3,7 @@
 
 #include "HW/Latte/Core/LattePM4.h"
 #include "OS/libs/coreinit/coreinit_Time.h"
+#include "Cafe/HW/Latte/Core/LatteGpuWake.h"
 
 namespace TCL
 {
@@ -81,6 +82,13 @@ namespace TCL
 		return true;
 	}
 
+	// Whether TCLGPUReadRBWord has a word to give, without taking it
+	bool TCLGPUHasRBWord()
+	{
+		return tclRingBufferA_readIndex.load(std::memory_order::relaxed) !=
+			tclRingBufferA_writeIndex.load(std::memory_order::acquire);
+	}
+
 	void TCLWaitForRBSpace(uint32be numU32s)
 	{
 		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
@@ -154,6 +162,10 @@ namespace TCL
 		{
 			cemu_assert_unimplemented();
 		}
+		// The GPU thread sleeps while the ring is empty (LatteCP_readU32Deprc):
+		// once per submission, with the whole of it written. No syscall when
+		// it is not asleep.
+		LatteGpuWake_Notify();
 		return 0;
 	}
 

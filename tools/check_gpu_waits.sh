@@ -1,4 +1,11 @@
 #!/bin/sh
+# The GPU thread, with a thread of its own, sleeps when it has nothing to do
+# rather than spinning: LatteCP_readU32Deprc, with the command ring empty,
+# waits on LatteGpuWake until the CPU submits (TCLSubmitToRing notifies),
+# queues an async command, flips an OSScreen, the pause gate is asked for or
+# the next timed vsync is due. Upstream spins there, a host core kept busy for
+# as long as the emulated CPU takes to send the next command.
+#
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
 # the clock. Each of them used to check every 1 to 50 ms, and the boot paid for
@@ -57,6 +64,9 @@ check src/libretro/CemuLibretro.cpp 'libretro_prepare_and_launch_title\(\)$' Lat
 check src/Cafe/IOSU/nn/iosu_nn_service.cpp 'void IPCSimpleService::Start\(\)' 'm_threadInitialized.Wait()'
 check src/Cafe/IOSU/nn/iosu_nn_service.cpp 'void IPCService::Start\(\)' 'm_threadInitialized.Wait()'
 check src/Cafe/IOSU/ODM/iosu_odm.cpp 'void Initialize\(\)' 's_threadInitialized.Wait()'
+check src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp '^uint32 LatteCP_readU32Deprc\(\)' LatteCP_waitForWork
+check src/Cafe/HW/Latte/Core/LatteCommandProcessor.cpp '^static void LatteCP_waitForWork\(\)' LatteGpuWake_WaitUntil
+check src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp '^void LatteAsyncCommands_waitUntilAllProcessed\(\)' LatteGpuWake_WaitUntil
 
 if pp $L | grep -q 'condition_variable'; then
 	echo "$L: the pause gate is back on a condition variable"; fail=1
@@ -78,6 +88,13 @@ need $L 'sGpuPauseRequested.store(false' LatteGpuWake_Notify
 need src/Cafe/GraphicPack/GraphicPack2.cpp 's_isReady = true;' LatteGpuWake_Notify
 need src/Cafe/OS/libs/gx2/GX2_Misc.cpp 'gx2InitCalled++;' LatteGpuWake_Notify
 need src/Cafe/OS/libs/coreinit/coreinit_OSScreen.cpp 'flipRequestCount++;' LatteGpuWake_Notify
+need src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp 'LatteAsyncCommandQueue.push' LatteGpuWake_Notify
+if ! body src/Cafe/HW/Latte/Core/LatteAsyncCommands.cpp '^void LatteAsyncCommands_checkAndExecute\(\)' | tail -3 | grep -q LatteGpuWake_Notify; then
+	echo "LatteAsyncCommands_checkAndExecute does not wake the queue's waiter"; fail=1
+fi
+if ! body src/Cafe/OS/libs/TCL/TCL.cpp 'int TCLSubmitToRing\(' | grep -q LatteGpuWake_Notify; then
+	echo "TCLSubmitToRing does not wake the GPU thread"; fail=1
+fi
 
-[ $fail -eq 0 ] && echo "boot waits sleep until woken, none by the clock"
+[ $fail -eq 0 ] && echo "GPU idle and boot waits sleep until woken, none by the clock or spinning"
 exit $fail

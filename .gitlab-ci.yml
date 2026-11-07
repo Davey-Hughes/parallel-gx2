@@ -256,13 +256,13 @@ test-input-per-frame:
   script:
     - ./tools/check_input_per_frame.sh
 
-# The waits between loading a title and its first frame sleep until notified,
-# not by the clock.
-test-boot-waits:
+# An idle GPU thread sleeps until the CPU submits, and the waits between
+# loading a title and its first frame sleep until notified, not by the clock.
+test-gpu-waits:
   stage: test
   image: $CI_SERVER_HOST:5050/libretro-infrastructure/libretro-build-amd64-ubuntu:backports
   needs: []
   variables:
     GIT_SUBMODULE_STRATEGY: none
   script:
-    - ./tools/check_boot_waits.sh
+    - ./tools/check_gpu_waits.sh

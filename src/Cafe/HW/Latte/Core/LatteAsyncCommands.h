@@ -7,5 +7,6 @@ void LatteAsyncCommands_queueForceTextureReadback(MPTR physAddr, MPTR mipAddr, u
 void LatteAsyncCommand_queueTextureCopy(const LatteSurfaceCopyParam& src, const LatteSurfaceCopyParam& dst, const LatteSurfaceCopyRect& rect);
 void LatteAsyncCommands_queueDeleteShader(uint64 shaderBaseHash, uint64 shaderAuxHash, LatteConst::ShaderType shaderType);
 void LatteAsyncCommands_waitUntilAllProcessed();
+bool LatteAsyncCommands_isEmpty(); // a racy look, for a wait's predicate
 
 void LatteAsyncCommands_checkAndExecute();

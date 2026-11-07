@@ -8,6 +8,9 @@
 //    a bounded wait comes back by its deadline when it is not, and the boot's
 //    back-and-forth between the GPU thread and the CPU thread - several
 //    waiters, each with its own predicate, on the one wake - never loses one;
+//  - the GPU's command ring as LatteCP_readU32Deprc now waits on it: every word
+//    arrives, in order, and a consumer with nothing to read sleeps until a
+//    submission or its vsync deadline instead of spinning;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - the audio ring hands out whole frames in place, across the wrap, for 2 and
@@ -246,6 +249,76 @@ static void TestGpuWakeBootHandoff()
 	}
 }
 
+// The command ring's idle wait: the emulated CPU submits bursts with gaps
+// between them (TCLSubmitToRing, then one notify), the GPU thread reads until
+// the ring is empty, then sleeps until the next submission or its next vsync
+// (LatteCP_waitForWork). Every word arrives in order - a lost wake would hold a
+// burst back to the vsync deadline, which the elapsed time below would show -
+// and the consumer goes round its loop a handful of times per burst, not the
+// millions of times a spin does.
+static void TestGpuRingIdleWait()
+{
+	constexpr uint32_t kSize = 4096;
+	static std::atomic<uint32_t> ring[kSize];
+	std::atomic<uint32_t> readIndex{0}, writeIndex{0};
+	std::atomic_bool done{false};
+	constexpr int kBursts = 60;
+	constexpr int kWords = 100;
+
+	std::thread cpu([&] {
+		uint32_t value = 0;
+		for (int b = 0; b < kBursts; b++)
+		{
+			uint32_t w = writeIndex.load(std::memory_order_relaxed);
+			for (int i = 0; i < kWords; i++)
+			{
+				while (((w + 1) & (kSize - 1)) == readIndex.load(std::memory_order_acquire))
+					std::this_thread::yield();
+				ring[w].store(value++, std::memory_order_relaxed);
+				w = (w + 1) & (kSize - 1);
+			}
+			writeIndex.store(w, std::memory_order_release);
+			LatteGpuWake_Notify();
+			std::this_thread::sleep_for(std::chrono::milliseconds(3)); // the gap
+		}
+		done.store(true, std::memory_order_release);
+		LatteGpuWake_Notify();
+	});
+
+	uint32_t expect = 0;
+	uint64_t idleRounds = 0;
+	const auto start = std::chrono::steady_clock::now();
+	auto nextVSync = start + std::chrono::microseconds(16667);
+	for (;;)
+	{
+		const uint32_t r = readIndex.load(std::memory_order_relaxed);
+		if (r != writeIndex.load(std::memory_order_acquire))
+		{
+			CHECK(ring[r].load(std::memory_order_relaxed) == expect);
+			expect++;
+			readIndex.store((r + 1) & (kSize - 1), std::memory_order_release);
+			continue;
+		}
+		if (done.load(std::memory_order_acquire) && r == writeIndex.load(std::memory_order_acquire))
+			break;
+		idleRounds++;
+		if (std::chrono::steady_clock::now() >= nextVSync)
+			nextVSync += std::chrono::microseconds(16667);
+		LatteGpuWake_WaitUntil([&] {
+			return readIndex.load(std::memory_order_relaxed) != writeIndex.load(std::memory_order_acquire) ||
+				done.load(std::memory_order_acquire);
+		}, nextVSync);
+	}
+	cpu.join();
+	CHECK(expect == uint32_t(kBursts * kWords));
+	// one wake per burst, one per vsync, and a few spurious ones to spare
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+	const uint64_t vsyncs = uint64_t(elapsed / std::chrono::microseconds(16667)) + 1;
+	CHECK(idleRounds <= uint64_t(kBursts) * 4 + vsyncs * 2);
+	if (idleRounds > uint64_t(kBursts) * 4 + vsyncs * 2)
+		std::fprintf(stderr, "ring idle wait: %llu rounds for %d bursts\n", (unsigned long long)idleRounds, kBursts);
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -391,6 +464,7 @@ int main()
 	TestGpuWake();
 	TestGpuWakeDeadline();
 	TestGpuWakeBootHandoff();
+	TestGpuRingIdleWait();
 	TestThreadStartedFlag();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);

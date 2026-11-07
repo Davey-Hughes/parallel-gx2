@@ -370,6 +370,18 @@ bool LatteHandleOSScreen_DRC()
 	return true;
 }
 
+// An OSScreen flip LatteThread_HandleOSScreen has yet to show: what the GPU
+// thread wakes for while it sleeps for want of other work.
+bool LatteThread_IsOSScreenFlipPending()
+{
+	for (auto& screen : LatteGPUState.osScreen.screen)
+	{
+		if (screen.isEnabled && screen.flipExecuteCount != screen.flipRequestCount)
+			return true;
+	}
+	return false;
+}
+
 void LatteThread_HandleOSScreen()
 {
 	bool swapTV = LatteHandleOSScreen_TV();
@@ -476,10 +488,7 @@ int Latte_ThreadEntry()
 				const auto nextLog = waitStart + std::chrono::seconds(loggedAfter < 5 ? 5 : loggedAfter < 30 ? 30 : 3600);
 				LatteGpuWake_WaitUntil([] {
 					return LatteGPUState.gx2InitCalled != 0 || Latte_GetStopSignal() ||
-						(LatteGPUState.osScreen.screen[0].isEnabled &&
-							LatteGPUState.osScreen.screen[0].flipExecuteCount != LatteGPUState.osScreen.screen[0].flipRequestCount) ||
-						(LatteGPUState.osScreen.screen[1].isEnabled &&
-							LatteGPUState.osScreen.screen[1].flipExecuteCount != LatteGPUState.osScreen.screen[1].flipRequestCount);
+						LatteThread_IsOSScreenFlipPending();
 				}, nextLog);
 			}
 			LatteThread_HandleOSScreen();
