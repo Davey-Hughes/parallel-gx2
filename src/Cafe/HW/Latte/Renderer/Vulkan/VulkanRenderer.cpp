@@ -2559,8 +2559,8 @@ void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 	if (m_libretroFramePending)
 	{
 		m_libretroFramePending = false;
-		extern void libretro_signal_frame_ready();
-		libretro_signal_frame_ready();
+		extern void libretro_signal_frame_ready(uint32_t width, uint32_t height);
+		libretro_signal_frame_ready(m_presentWidth, m_presentHeight);
 	}
 
 	// The work is submitted and the frame is the frontend's; park here until it

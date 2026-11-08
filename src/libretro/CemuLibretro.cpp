@@ -636,8 +636,12 @@ static double libretro_wanted_fps()
 	return fps;
 }
 
-void libretro_signal_frame_ready()
+static void libretro_publish_frame_screens(uint32_t width, uint32_t height);
+
+// The GPU thread's frame of width x height is ready for retro_run
+void libretro_signal_frame_ready(uint32_t width, uint32_t height)
 {
+	libretro_publish_frame_screens(width, height);
 	s_prof_frames_ready.fetch_add(1, std::memory_order_relaxed);
 	s_game_frames.fetch_add(1, std::memory_order_relaxed);
 	s_frame_ready.store(true, std::memory_order_release);
@@ -748,8 +752,13 @@ static uint32_t libretro_out_height()
 }
 
 // Tells the frontend when the output size changes, e.g. when a resolution
-// pack's size takes over from the core option's.
+// pack's size takes over from the core option's, and when its aspect does:
+// the GPU thread resizes the presentation image before it signals the first
+// frame drawn at the new size, so a run can see Both Screens' packed size
+// while the last frame signalled still says one 16:9 screen, and the aspect
+// that goes with the size follows a run later.
 static uint32_t s_reported_out_width = 0, s_reported_out_height = 0; // what the frontend was last told
+static float s_reported_out_aspect = 0.0f;
 // The largest frame the frontend was told to expect. 4x 720p covers every
 // Internal Resolution step of a 720p game, but 3x of a 1080p game (5760x3240)
 // or a big resolution pack goes past it, and SET_GEOMETRY must not exceed the
@@ -758,13 +767,21 @@ static uint32_t s_reported_out_width = 0, s_reported_out_height = 0; // what the
 // (retro_get_system_av_info).
 static uint32_t s_max_out_width = SCREEN_WIDTH * 4, s_max_out_height = SCREEN_HEIGHT * 4;
 
-// The frame's display aspect: 16:9, the TV's and the GamePad's, except for
-// Both Screens, whose frame holds the two 16:9 pictures one under the other
-// and is as wide as its pixels. Taken from the layout when the size changes,
-// which is with the first frame drawn with the new layout.
+// What the last frame signalled shows, for the map that describes it and its
+// aspect: published by the GPU thread with the frame
+// (libretro_publish_frame_screens), read by retro_run before it hands the
+// frame over. Through a SeqlockValue: rendering ahead, the GPU thread
+// publishes the next frame's while retro_run reads.
+static SeqlockValue<LibretroFrameScreens> s_frame_screens;
+
+// The display aspect of a frame of width x height: 16:9, the TV's and the
+// GamePad's, except for a frame of Both Screens, which holds the two 16:9
+// pictures one under the other and is as wide as its pixels. From what the
+// frame was drawn with, not the layout chosen since.
 static float libretro_out_aspect(uint32_t width, uint32_t height)
 {
-	if (g_libretroScreenLayout == LibretroScreenLayout::BothScreens && width && height)
+	const LibretroFrameScreens frame = s_frame_screens.Load();
+	if (frame.count == 2 && frame.width == width && frame.height == height && height)
 		return (float)width / (float)height;
 	return 16.0f / 9.0f;
 }
@@ -772,7 +789,8 @@ static float libretro_out_aspect(uint32_t width, uint32_t height)
 static void libretro_report_out_size()
 {
 	const uint32_t width = libretro_out_width(), height = libretro_out_height();
-	if (width == s_reported_out_width && height == s_reported_out_height)
+	const float aspect = libretro_out_aspect(width, height);
+	if (width == s_reported_out_width && height == s_reported_out_height && aspect == s_reported_out_aspect)
 		return;
 	if (width > s_max_out_width || height > s_max_out_height)
 	{
@@ -786,14 +804,15 @@ static void libretro_report_out_size()
 	}
 	s_reported_out_width = width;
 	s_reported_out_height = height;
+	s_reported_out_aspect = aspect;
 	retro_game_geometry geometry{};
 	geometry.base_width = width;
 	geometry.base_height = height;
 	geometry.max_width = s_max_out_width;
 	geometry.max_height = s_max_out_height;
-	geometry.aspect_ratio = libretro_out_aspect(width, height);
+	geometry.aspect_ratio = aspect;
 	environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geometry);
-	libretro_log(RETRO_LOG_INFO, "output is now %ux%u\n", width, height);
+	libretro_log(RETRO_LOG_INFO, "output is now %ux%u, aspect %.3f\n", width, height, aspect);
 }
 
 #ifdef ENABLE_OPENGL
@@ -892,6 +911,17 @@ static bool s_next_layout_button_held = false;
 // pad holding one meant the layout change and nothing else; dropping the
 // frame's input wholesale is enough and needs no per-button bookkeeping.
 static bool s_layout_combo_held_this_frame = false;
+
+// The frontend's video views (RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS), as of
+// this retro_run: whether it lays out the screens of a frame itself, and
+// whether it shows both eyes. 0 where it has none.
+static unsigned s_views_status = 0;
+// Cleared once the frontend did not know the call: it is not asked again.
+static bool s_views_status_supported = true;
+// The frontend holds a map from the core, which an empty one takes back.
+static bool s_views_map_sent = false;
+// The frontend refused the last map, which was logged.
+static bool s_views_map_rejected = false;
 
 static retro_hw_render_callback s_hw_render{};
 
@@ -1515,7 +1545,7 @@ public:
 		s_gl_frame_fbo = libretro_getBackbufferFBO(width, height);
 		s_gl_frame_width = width;
 		s_gl_frame_height = height;
-		libretro_signal_frame_ready();
+		libretro_signal_frame_ready((uint32_t)width, (uint32_t)height);
 		// The frame is the frontend's now: give its thread back until the next
 		// retro_run. Only for the TV swap - a DRC swap is part of the same frame,
 		// and stopping at both would halve the frame rate of a title that does
@@ -2465,9 +2495,13 @@ static LibretroLayoutButton libretro_parse_layout_button(const char* v)
 	return LibretroLayoutButton::None;
 }
 
+// The layout the renderers draw with: the slot's, or Both Screens in place of
+// a composite one while the frontend shows both eyes
+// (LibretroViews_EffectiveLayout). Called when the slot, its layout or the
+// frontend's views status changes.
 static void libretro_apply_screen_layout()
 {
-	const LibretroScreenLayout layout = s_screen_layouts[s_screen_layout_index];
+	const LibretroScreenLayout layout = LibretroViews_EffectiveLayout(s_screen_layouts[s_screen_layout_index], s_views_status);
 	if (layout == g_libretroScreenLayout)
 		return;
 
@@ -2475,6 +2509,74 @@ static void libretro_apply_screen_layout()
 	const bool padVisible = layout != LibretroScreenLayout::Tv;
 	ActiveSettings::SetLibretroDisplayDRCOverride(padVisible);
 	WindowSystem::GetWindowInfo().pad_open = padVisible;
+}
+
+// Every retro_run, before the GPU thread is let go for the next frame: whether
+// the frontend lays out views, and whether it shows both eyes, which turns the
+// composite layouts into Both Screens. The answer can change at any time - the
+// frontend's stereo mode, its video driver, a headset.
+static void libretro_update_video_views_status()
+{
+	unsigned status = 0;
+	if (s_views_status_supported && !environ_cb(RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS, &status))
+	{
+		s_views_status_supported = false;
+		status = 0;
+	}
+	if (status == s_views_status)
+		return;
+	libretro_log(RETRO_LOG_INFO, "video views: presents=%d stereo=%d headset=%d\n",
+		(status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS) ? 1 : 0,
+		(status & RETRO_VIDEO_VIEWS_STATUS_STEREO) ? 1 : 0,
+		(status & RETRO_VIDEO_VIEWS_STATUS_HMD) ? 1 : 0);
+	s_views_status = status;
+	libretro_apply_screen_layout();
+}
+
+// Right before a frame of width x height goes to the frontend: the map of the
+// screens in it, every run as the API asks, while the frontend lays out views.
+// An empty map, once, when it stops, when the frame has no screens to describe,
+// or when the frame is not the size its screens were published for (resized on
+// the GPU thread since; the next frame is described again).
+static void libretro_send_video_views(uint32_t width, uint32_t height)
+{
+	retro_video_view views[2];
+	unsigned count = 0;
+	if (s_views_status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS)
+	{
+		const LibretroFrameScreens frame = s_frame_screens.Load();
+		if (frame.width == width && frame.height == height)
+			count = LibretroViews_BuildMap(frame, views);
+	}
+	if (count)
+	{
+		retro_video_views map{};
+		map.views = views;
+		map.num_views = count;
+		const bool accepted = environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, &map);
+		if (!accepted && !s_views_map_rejected)
+			libretro_log(RETRO_LOG_ERROR, "the frontend refused a video views map of %u views (%ux%u)\n", count, width, height);
+		s_views_map_rejected = !accepted;
+		s_views_map_sent = true;
+	}
+	else if (s_views_map_sent)
+	{
+		retro_video_views none{};
+		environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, &none);
+		s_views_map_sent = false;
+		s_views_map_rejected = false;
+	}
+}
+
+// With each frame the GPU thread signals: what it shows, from the layout it was
+// drawn with and its size.
+static void libretro_publish_frame_screens(uint32_t width, uint32_t height)
+{
+	uint32_t tvW, tvH, padW, padH;
+	libretro_screen_size(false, tvW, tvH);
+	libretro_screen_size(true, padW, padH);
+	s_frame_screens.Store(LibretroViews_FrameScreens(g_libretroScreenLayout, g_libretroDRCPositionSwapped,
+		width, height, tvW, tvH, padW, padH));
 }
 
 // Both conversion options are pointless without a destination - the title is
@@ -2645,7 +2747,7 @@ static void libretro_next_screen_layout()
 
 	libretro_log(RETRO_LOG_INFO, "screen layout %u of %u (%s)\n",
 		s_screen_layout_index + 1, s_screen_layout_count,
-		libretro_screen_layout_name(g_libretroScreenLayout));
+		libretro_screen_layout_name(s_screen_layouts[s_screen_layout_index]));
 }
 
 static void libretro_start_wua_conversion(TitleId baseTitleId, const fs::path& gamePath);
@@ -4125,7 +4227,7 @@ RETRO_API void retro_get_system_av_info(struct retro_system_av_info* info)
 	info->geometry.base_height = s_reported_out_height = libretro_out_height();
 	info->geometry.max_width = std::max(s_max_out_width, info->geometry.base_width);
 	info->geometry.max_height = std::max(s_max_out_height, info->geometry.base_height);
-	info->geometry.aspect_ratio = libretro_out_aspect(info->geometry.base_width, info->geometry.base_height);
+	info->geometry.aspect_ratio = s_reported_out_aspect = libretro_out_aspect(info->geometry.base_width, info->geometry.base_height);
 	if (!s_game_loaded)
 		s_output_fps = libretro_wanted_fps();
 	info->timing.fps = s_output_fps;
@@ -6139,12 +6241,12 @@ RETRO_API void retro_unload_game()
 	libretro_set_motion(false);
 	// The next content takes the output size afresh from the option.
 	s_out_size_taken = false;
-	// So do the pictures' sizes Both Screens packs
-	for (int i = 0; i < 2; i++)
-	{
-		s_screen_width[i].store(0, std::memory_order_relaxed);
-		s_screen_height[i].store(0, std::memory_order_relaxed);
-	}
+	// The frontend drops the views map when content unloads; the next content
+	// asks for the status afresh
+	s_views_status = 0;
+	s_views_status_supported = true;
+	s_views_map_sent = false;
+	s_views_map_rejected = false;
 	libretro_reset_install_switches();
 
 	// Before anything else: stop handing the frontend audio. This used to be
@@ -6177,6 +6279,18 @@ RETRO_API void retro_unload_game()
 	// Whichever way it goes, this wakes anything still waiting on a frame that
 	// is never coming: both of its paths call libretro_wake_frame_waiters.
 	const bool stopped = libretro_stop_title();
+
+	// With the GPU thread stopped, which notes them: the next content takes
+	// the pictures' sizes Both Screens packs afresh, and has no frame to
+	// describe until it draws one. The frame record has one writer, so not
+	// while a title that would not stop still draws.
+	for (int i = 0; i < 2; i++)
+	{
+		s_screen_width[i].store(0, std::memory_order_relaxed);
+		s_screen_height[i].store(0, std::memory_order_relaxed);
+	}
+	if (stopped)
+		s_frame_screens.Store(LibretroFrameScreens{});
 
 	if (!stopped)
 	{
@@ -7555,6 +7669,9 @@ RETRO_API void retro_run()
 	InputManager::instance().update_controllers();
 	libretro_update_rumble();
 	libretro_update_software_keyboard();
+	// Before the GPU thread is let go: the frontend's views decide the layout
+	// the next frame is drawn with
+	libretro_update_video_views_status();
 
 	using prof_clock = std::chrono::steady_clock;
 	const auto profStart = prof_clock::now();
@@ -7715,6 +7832,7 @@ RETRO_API void retro_run()
 			}
 		}
 		libretro_report_out_size();
+		libretro_send_video_views(libretro_out_width(), libretro_out_height());
 		video_cb(RETRO_HW_FRAME_BUFFER_VALID, libretro_out_width(), libretro_out_height(), 0);
 		libretro_finish_run(profStart, profWaited, profTimedOut);
 		return;
@@ -7729,6 +7847,7 @@ RETRO_API void retro_run()
 #endif // ENABLE_OPENGL
 
 	libretro_report_out_size();
+	libretro_send_video_views(libretro_out_width(), libretro_out_height());
 	video_cb(RETRO_HW_FRAME_BUFFER_VALID, libretro_out_width(), libretro_out_height(), 0);
 	// Flush audio
 	libretro_finish_run(profStart, profWaited, profTimedOut);
