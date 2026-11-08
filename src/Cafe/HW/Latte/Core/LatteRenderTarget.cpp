@@ -1017,7 +1017,7 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 
 	bool showDRC = swkbd_hasKeyboardInputHook() == false && (isDRCPrimary ^ altScreenRequested);
 
-	// In libretro composite display modes (SBS / TopBottom / PiP) both screens
+	// In libretro composite display modes (SBS / TopBottom / PiP / Both Screens) both screens
 	// are presented simultaneously, so the standalone showDRC toggle-swap (which
 	// substitutes DRC for TV when the user holds Tab) must not apply — route each
 	// renderTarget straight to its own destination. We also enforce TV-then-DRC
@@ -1026,7 +1026,8 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 	const bool libretroComposite =
 		g_libretroScreenLayout == LibretroScreenLayout::SideBySide ||
 		g_libretroScreenLayout == LibretroScreenLayout::TopBottom ||
-		g_libretroScreenLayout == LibretroScreenLayout::PictureInPicture;
+		g_libretroScreenLayout == LibretroScreenLayout::PictureInPicture ||
+		g_libretroScreenLayout == LibretroScreenLayout::BothScreens;
 	// The GamePad-only layout has the same ordering problem, for a different
 	// reason: the mirror at the end of this function copies the TV image into
 	// the pad view for titles that never draw a DRC image of their own, and a

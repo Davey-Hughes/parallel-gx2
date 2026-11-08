@@ -542,6 +542,10 @@ void OpenGLRenderer::HandleScreenshotRequest(LatteTextureView* texView, bool pad
 	SaveScreenshot(rgb_data, screenshotWidth, screenshotHeight, !padView);
 }
 
+// Counts the backbuffer's renderbuffers made (libretro_getBackbufferFBO): a new
+// one holds nothing defined until it is cleared
+static uint32 s_libretro_fbo_generation = 0;
+
 void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
 	if (padView && !IsPadWindowActive())
@@ -562,7 +566,8 @@ void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	GLCanvas_MakeCurrent(padView);
 
 	// The backbuffer takes the size the TV picture is rendered at (the
-	// GamePad's with the GamePad Screen layout), before it is bound below
+	// GamePad's with the GamePad Screen layout, both packed with Both Screens),
+	// before it is bound below
 	extern bool LibretroDRC_OutputFollowsScreen(bool padView);
 	if (LibretroDRC_OutputFollowsScreen(padView))
 	{
@@ -594,15 +599,21 @@ void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 		adjustedX, adjustedY, adjustedWidth, adjustedHeight);
 
 	// When both screens are shown (Side by Side, Top Bottom, Picture in
-	// Picture) they share this one backbuffer, and the GamePad blit asks for a
-	// clear: it wiped the TV image drawn just before, so only the GamePad
-	// screen was ever seen. Clear once per frame, before whichever screen comes
-	// first, as the Vulkan path does with its presentation image.
+	// Picture, Both Screens) they share this one backbuffer, and the GamePad
+	// blit asks for a clear: it wiped the TV image drawn just before, so only
+	// the GamePad screen was ever seen. Clear once per frame, before whichever
+	// screen comes first, as the Vulkan path does with its presentation image -
+	// and again when the backbuffer was made anew in the middle of the frame
+	// (Both Screens, when the second picture's size changes), whose contents
+	// are undefined until then.
 	if (GLCanvas_ShouldRenderScreen(!padView))
 	{
 		static uint32 s_lastClearedFrame = ~0u;
-		clearBackground = s_lastClearedFrame != LatteGPUState.frameCounter;
+		static uint32 s_lastClearedGeneration = ~0u;
+		clearBackground = s_lastClearedFrame != LatteGPUState.frameCounter ||
+			s_lastClearedGeneration != s_libretro_fbo_generation;
 		s_lastClearedFrame = LatteGPUState.frameCounter;
+		s_lastClearedGeneration = s_libretro_fbo_generation;
 	}
 
 	if (clearBackground)
@@ -780,6 +791,7 @@ GLuint libretro_getBackbufferFBO(int width, int height)
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_RENDERBUFFER_EXT, s_libretro_rbo);
 		s_libretro_fbo_w = width;
 		s_libretro_fbo_h = height;
+		s_libretro_fbo_generation++;
 	}
 	return s_libretro_fbo;
 }

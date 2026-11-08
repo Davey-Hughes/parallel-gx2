@@ -501,6 +501,9 @@ void VulkanRenderer::CreatePresentationImage(uint32 width, uint32 height)
 	m_presentWidth = width;
 	m_presentHeight = height;
 	m_presentImageHasContent = false;
+	// Nothing is in it: the next blit clears it, even in the middle of a frame
+	// (Both Screens makes a new one when the second picture's size changes)
+	m_presentLastFrameCounter = ~0u;
 	cemuLog_log(LogType::Force, "[Vulkan-LR] Created presentation image {}x{} ({})", width, height,
 		m_presentImageIsSRGB ? "sRGB, blits encode into it" : "UNORM, blits go in as they are");
 }
@@ -524,23 +527,36 @@ void VulkanRenderer::UpdatePresentationImageColorSpace()
 
 // The presentation image takes the size of the screen the output follows
 // (LibretroDRC_OutputFollowsScreen): the GamePad picture's with the GamePad
-// Screen layout (NNshi: 854x480, not 1280x720), the TV picture's when a
-// resolution pack sets it, and otherwise the size the core started at - which
-// is also where it goes back to from the GamePad Screen layout.
+// Screen layout (NNshi: 854x480, not 1280x720), both pictures' packed with
+// Both Screens, the TV picture's when a resolution pack sets it, and otherwise
+// the size the core started at - which is also where it goes back to from the
+// GamePad Screen layout.
 void VulkanRenderer::UpdatePresentationImageSize(uint32 width, uint32 height, bool padView)
 {
-	// The frontend was told it may get up to four times 1280x720
-	constexpr uint32 maxWidth = 1280 * 4, maxHeight = 720 * 4;
+	// What a broken size could ask for at most: four times 1280x720, with four
+	// times the GamePad's 854x480 under it for Both Screens (resolution packs
+	// for both). The frontend's max follows the size handed to it
+	// (libretro_report_out_size).
+	constexpr uint32 maxWidth = 1280 * 4, maxHeight = (720 + 480) * 4;
 	if (m_presentImage == VK_NULL_HANDLE)
 		return;
 	if (!padView && !LatteTexture_graphicPackSetsResolution())
 		LibretroDRC_DefaultOutputSize(width, height);
-	if (width < 16 || height < 16 || width > maxWidth || height > maxHeight)
+	if (width < 16 || height < 16)
+		return;
+	const uint32 pictureWidth = width, pictureHeight = height;
+	if (g_libretroScreenLayout == LibretroScreenLayout::BothScreens)
+	{
+		LibretroDRC_NoteScreenSize(padView, width, height);
+		LibretroDRC_PackedSize(width, height);
+	}
+	if (width > maxWidth || height > maxHeight)
 		return;
 	if (width == m_presentWidth && height == m_presentHeight)
 		return;
 
-	cemuLog_log(LogType::Force, "[Vulkan-LR] the {} picture is {}x{}; presenting at that size", padView ? "GamePad" : "TV", width, height);
+	cemuLog_log(LogType::Force, "[Vulkan-LR] the {} picture is {}x{}; presenting at {}x{}",
+		padView ? "GamePad" : "TV", pictureWidth, pictureHeight, width, height);
 	RetirePresentationImage();
 	CreatePresentationImage(width, height);
 }

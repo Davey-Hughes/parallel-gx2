@@ -24,8 +24,15 @@ void LibretroDRC_ComputeViewport(bool padView,
 	int& outX, int& outY, int& outWidth, int& outHeight);
 
 // The screen whose size the frame handed to the frontend takes: the GamePad's
-// with the GamePad Screen layout, the TV's with every other one.
+// with the GamePad Screen layout, both packed with Both Screens, the TV's with
+// every other one.
 bool LibretroDRC_OutputFollowsScreen(bool padView);
+
+// Both Screens: the size a picture is drawn at (the GamePad's when padView),
+// noted by the renderer as it draws it, and the size of the frame the two are
+// packed into.
+void LibretroDRC_NoteScreenSize(bool padView, uint32 width, uint32 height);
+void LibretroDRC_PackedSize(uint32& width, uint32& height);
 
 // The size the core's output started at (the Internal Resolution option),
 // which the TV picture is handed over at unless a resolution pack sets it.
