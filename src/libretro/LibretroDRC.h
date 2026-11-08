@@ -8,8 +8,32 @@
 #include "Common/precompiled.h"
 #include "LibretroViews.h"
 
-extern LibretroScreenLayout g_libretroScreenLayout;
-extern bool g_libretroDRCPositionSwapped;
+// The layout the renderers draw with and GamePad Position Swapped, in one word
+// so a reader gets the two together: written on retro_run's thread, read on
+// the GPU thread.
+constexpr uint32 kLibretroScreenLayoutMask = 0xFFu;
+constexpr uint32 kLibretroScreenSwapped = 1u << 8;
+extern std::atomic<uint32> g_libretroScreenState;
+
+inline uint32 LibretroDRC_State()
+{
+	return g_libretroScreenState.load(std::memory_order_relaxed);
+}
+
+inline LibretroScreenLayout LibretroDRC_Layout(uint32 state = LibretroDRC_State())
+{
+	return (LibretroScreenLayout)(state & kLibretroScreenLayoutMask);
+}
+
+inline bool LibretroDRC_Swapped(uint32 state = LibretroDRC_State())
+{
+	return (state & kLibretroScreenSwapped) != 0;
+}
+
+// Counts the times the renderer cleared what the screens had left in the
+// frontend's image (a new image, or the screens moved in it). GPU thread only.
+uint32 LibretroDRC_PresentClears();
+void LibretroDRC_NotePresentClear();
 
 // Returns true when Cemu should actually present the requested screen for the
 // active layout. Used both by OpenGLCanvasCallbacks::ShouldRenderScreen and

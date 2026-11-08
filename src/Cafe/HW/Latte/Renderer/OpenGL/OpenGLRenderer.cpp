@@ -625,6 +625,7 @@ void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	{
 		g_renderer->renderTarget_setViewport(0, 0, windowWidth, windowHeight, 0.0f, 1.0f);
 		g_renderer->ClearColorbuffer(padView);
+		LibretroDRC_NotePresentClear();
 	}
 
 	shader_unbind(RendererShader::ShaderType::kGeometry);

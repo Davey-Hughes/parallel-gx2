@@ -145,3 +145,47 @@ inline unsigned LibretroViews_BuildMap(const LibretroFrameScreens& frame, retro_
 	}
 	return frame.count;
 }
+
+// The parts of box that no rectangle in cover overlaps, as disjoint
+// rectangles in out: the count. Two covers, the screens of a frame, cut a box
+// into at most 16 pieces; covers past the second are not looked at.
+inline unsigned LibretroViews_Uncovered(const LibretroScreenRect& box, const LibretroScreenRect* cover,
+	unsigned coverCount, LibretroScreenRect (&out)[16])
+{
+	unsigned count = 0;
+	if (box.width > 0 && box.height > 0)
+		out[count++] = box;
+	for (unsigned c = 0; c < coverCount && c < 2; c++)
+	{
+		if (cover[c].width <= 0 || cover[c].height <= 0)
+			continue;
+		const int cx0 = cover[c].x, cy0 = cover[c].y;
+		const int cx1 = cx0 + cover[c].width, cy1 = cy0 + cover[c].height;
+		LibretroScreenRect left[16];
+		unsigned n = 0;
+		for (unsigned i = 0; i < count; i++)
+		{
+			const LibretroScreenRect p = out[i];
+			const int px1 = p.x + p.width, py1 = p.y + p.height;
+			if (cx1 <= p.x || cx0 >= px1 || cy1 <= p.y || cy0 >= py1)
+			{
+				left[n++] = p;
+				continue;
+			}
+			// Above and below the cover across the piece, then left and right
+			// of it between those
+			const int y0 = std::max(p.y, cy0), y1 = std::min(py1, cy1);
+			if (p.y < y0)
+				left[n++] = {p.x, p.y, p.width, y0 - p.y};
+			if (y1 < py1)
+				left[n++] = {p.x, y1, p.width, py1 - y1};
+			if (p.x < cx0)
+				left[n++] = {p.x, y0, cx0 - p.x, y1 - y0};
+			if (cx1 < px1)
+				left[n++] = {cx1, y0, px1 - cx1, y1 - y0};
+		}
+		std::copy(left, left + n, out);
+		count = n;
+	}
+	return count;
+}

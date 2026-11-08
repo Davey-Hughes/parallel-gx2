@@ -9,7 +9,10 @@
 //  - the layouts that composite the two screens become Both Screens only while
 //    the frontend shows both eyes;
 //  - a frame's views map has one view per screen, numbered from 0, and none
-//    for a frame that has no screens to describe or whose screens do not fit.
+//    for a frame that has no screens to describe or whose screens do not fit;
+//  - what is left of the mouse cursor's box after the screens blitted in a
+//    frame (what the Vulkan renderer puts back) is every pixel of the box no
+//    screen covers, each once, and nothing else.
 #include "libretro/LibretroViews.h"
 
 #include <cstdio>
@@ -128,8 +131,69 @@ static void test_frame_screens_and_map()
 	}
 }
 
+// Every pixel of a 24x24 field: in the pieces exactly once where the box has
+// it and no cover does, and in none elsewhere
+static bool uncovered_exact(const LibretroScreenRect& box, const LibretroScreenRect* cover, unsigned coverCount)
+{
+	LibretroScreenRect out[16];
+	const unsigned n = LibretroViews_Uncovered(box, cover, coverCount, out);
+	const auto inside = [](const LibretroScreenRect& r, int x, int y)
+	{
+		return x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height;
+	};
+	for (unsigned i = 0; i < n; i++)
+		if (out[i].width <= 0 || out[i].height <= 0)
+			return false;
+	for (int y = -2; y < 22; y++)
+		for (int x = -2; x < 22; x++)
+		{
+			bool want = inside(box, x, y);
+			for (unsigned c = 0; c < coverCount; c++)
+				want = want && !inside(cover[c], x, y);
+			unsigned hits = 0;
+			for (unsigned i = 0; i < n; i++)
+				hits += inside(out[i], x, y) ? 1 : 0;
+			if (hits != (want ? 1u : 0u))
+				return false;
+		}
+	return true;
+}
+
+static void test_uncovered()
+{
+	const LibretroScreenRect box{4, 4, 10, 8};
+	LibretroScreenRect out[16];
+
+	// No screen blitted: the whole box
+	CHECK(LibretroViews_Uncovered(box, nullptr, 0, out) == 1 && same(out[0], 4, 4, 10, 8));
+
+	// The box inside a screen scanned out again: nothing to copy
+	const LibretroScreenRect screen{0, 0, 20, 20};
+	CHECK(LibretroViews_Uncovered(box, &screen, 1, out) == 0);
+
+	// Over the edge between Both Screens' TV and GamePad, only the TV
+	// scanned out: the GamePad's part
+	const LibretroScreenRect tv{0, 0, 20, 8};
+	CHECK(LibretroViews_Uncovered(box, &tv, 1, out) == 1 && same(out[0], 4, 8, 10, 4));
+
+	// Every placement of two covers against the box, edges, corners and
+	// holes included
+	unsigned seed = 12345;
+	const auto next = [&seed](int range) { seed = seed * 1103515245u + 12345u; return (int)((seed >> 16) % (unsigned)range); };
+	for (int i = 0; i < 20000; i++)
+	{
+		const LibretroScreenRect b{next(12), next(12), next(10), next(10)};
+		const LibretroScreenRect c[2] = {
+			{next(20) - 2, next(20) - 2, next(14), next(14)},
+			{next(20) - 2, next(20) - 2, next(14), next(14)},
+		};
+		CHECK(uncovered_exact(b, c, (unsigned)next(3)));
+	}
+}
+
 int main()
 {
+	test_uncovered();
 	test_packed_size();
 	test_place_both();
 	test_effective_layout();

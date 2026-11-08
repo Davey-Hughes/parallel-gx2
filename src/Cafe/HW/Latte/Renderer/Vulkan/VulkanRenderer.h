@@ -11,6 +11,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.h"
 #include "util/math/vector2.h"
 #include "util/helpers/Semaphore.h"
+#include "libretro/LibretroViews.h"
 #include "util/helpers/MpscList.h"
 #include "util/containers/flat_hash_map.hpp"
 #include "util/containers/robin_hood.h"
@@ -672,6 +673,15 @@ public:
 	VkDeviceMemory m_cursorSaveBufferMemory = VK_NULL_HANDLE;
 	VkBufferImageCopy m_cursorSaveRegion{};
 	bool m_cursorSaved = false;
+	// The screens blitted into m_presentImage since the last frame was
+	// handed over: what of the saved arrow they did not cover goes back
+	// (RestoreUnderLibretroCursor). Two screens, so two rectangles.
+	LibretroScreenRect m_presentBlits[2]{};
+	uint32 m_presentBlitCount = 0;
+	// The cursor's copy regions, kept so a frame allocates nothing
+	std::vector<VkBufferImageCopy> m_cursorRegions;
+	void NotePresentBlit(int x, int y, int width, int height);
+	void RestoreUnderLibretroCursor();
 	void DrawLibretroCursor();
 private:
 
