@@ -151,6 +151,7 @@ public:
 	uint16 GetSourcePort() const { return m_srcPort; }
 
 	bool Update(); // update connection state and check for incoming packets. Returns true if ReceiveDatagram() should be called
+	SOCKET GetSocket() const { return m_socketUdp; } // for nexWaitForSockets
 
 	sint32 ReceiveDatagram(std::vector<uint8>& outputBuffer);
 	void SendDatagram(uint8* input, sint32 length, bool reliable = true);

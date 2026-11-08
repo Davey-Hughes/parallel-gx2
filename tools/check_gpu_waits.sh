@@ -36,7 +36,10 @@
 # and the two pipeline compile pools (MpmcQueue.h) - instead of
 # ConcurrentQueue's mutex and condition variable; and the shader compile pool,
 # whose queue a shader is claimed from rather than taken out of
-# (ClaimTicket.h), and whose compile state is atomic.
+# (ClaimTicket.h), and whose compile state is atomic. Online, the nex thread
+# and the logins sleep in select() on their sockets and a wake socket
+# (nexWait.h) instead of polling every millisecond - or, registering for
+# secure access, spinning.
 #
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
@@ -130,7 +133,8 @@ for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
 	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.cpp \
 	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h src/util/helpers/AtomicPtrBag.h \
 	src/util/helpers/MpscQueue.h src/util/helpers/MpmcQueue.h \
-	src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.cpp src/util/helpers/ClaimTicket.h; do
+	src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.cpp src/util/helpers/ClaimTicket.h \
+	src/Cemu/nex/nex.cpp src/Cemu/nex/nex.h src/Cemu/nex/nexThread.cpp src/Cemu/nex/nexWait.h; do
 	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for|FSpinlock'; then
 		echo "$f: takes a lock or sleeps again"; fail=1
 	fi

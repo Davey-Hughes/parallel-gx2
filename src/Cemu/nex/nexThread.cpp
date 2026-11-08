@@ -2,25 +2,60 @@
 #include "nex.h"
 #include "nexThread.h"
 
-std::mutex mtx_queuedServices;
-std::vector<nexService*> list_queuedServices;
+#include <atomic>
+#include "util/helpers/MpscList.h"
+#include "util/helpers/EventWake.h"
 
-std::vector<nexService*> list_activeNexServices;
+#include "nexWait.h"
+
+// Services handed to the nex thread, from whichever thread registers them: no
+// lock, the nex thread takes them all at the top of each pass
+static MpscList<nexService*> s_queuedServices;
+static std::atomic<uint32> s_queuedServiceCount{0};
+static ImmortalEventWake s_servicesWake; // the nex thread with no services sleeps on it
+
+std::vector<nexService*> list_activeNexServices; // the nex thread's alone
+
+static nexWait::Wake& GetNexWake()
+{
+	static nexWait::Wake s_wake; // made once, by whichever thread gets here
+	return s_wake;
+}
+
+void nexThread_wake()
+{
+	GetNexWake().Signal();
+}
+
+bool nexWaitForSockets(const SOCKET* sockets, size_t count, uint32 timeoutMs, bool withWake)
+{
+	return nexWait::WaitForSockets(sockets, count, timeoutMs, withWake ? &GetNexWake() : nullptr);
+}
+
+// How long the nex thread sleeps with nothing arriving: the protocol's own
+// clocks - retries after 1.2 and 2.3 s, pings every 1.5 s, request timeouts
+// after 10 s - only need looking at this often. Anything that arrives, or a
+// wake, ends the wait at once.
+static constexpr uint32 kNexIdleWaitMs = 100;
+
+static thread_local bool t_isNexThread = false;
 
 void nexThread_run()
 {
+	t_isNexThread = true;
+	std::vector<SOCKET> sockets;
 	while (true)
 	{
 		// check for new services
-		mtx_queuedServices.lock();
-		for(auto& it : list_queuedServices)
-			list_activeNexServices.push_back(it);
-		list_queuedServices.clear();
-		mtx_queuedServices.unlock();
-		// if service list is empty then pause
+		s_queuedServices.TakeAll([](nexService*&& service) {
+			list_activeNexServices.push_back(service);
+			s_queuedServiceCount.fetch_sub(1, std::memory_order_relaxed);
+		});
+		// if service list is empty, asleep until one is registered (it
+		// wakes this) rather than checking five times a second
 		if (list_activeNexServices.empty())
 		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			s_servicesWake->WaitUntil([] { return s_queuedServiceCount.load(std::memory_order_acquire) != 0; });
 			continue;
 		}
 		// update
@@ -45,37 +80,39 @@ void nexThread_run()
 		{
 			list_activeNexServices.resize(listSize);
 		}
-		// idle for short time
-		// todo - find a better way to handle this with lower latency. Maybe using select() with loopback socket for interrupting the select on service change
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		// Asleep until a packet arrives on any of them, a request is queued
+		// or a service registered (both wake this), or the protocol's clocks
+		// need looking at - instead of upstream's millisecond poll
+		sockets.clear();
+		for (auto& it : list_activeNexServices)
+		{
+			if (prudpClient* con = it->getPRUDPConnection())
+				sockets.push_back(con->GetSocket());
+		}
+		nexWaitForSockets(sockets.data(), sockets.size(), kNexIdleWaitMs, true);
 	}
 }
 
-bool _nexThreadLaunched = false;
-
-std::thread::id nexThreadId;
+static std::atomic_bool s_nexThreadLaunched{false};
 
 void nexThread_init()
 {
-	if (_nexThreadLaunched)
+	if (s_nexThreadLaunched.exchange(true))
 		return;
 	std::thread t(nexThread_run);
-	nexThreadId = t.get_id();
 	t.detach();
-	_nexThreadLaunched = true;
 }
 
 void nexThread_registerService(nexService* service)
 {
-	mtx_queuedServices.lock();
 	nexThread_init();
-	list_queuedServices.push_back(service);
-	mtx_queuedServices.unlock();
+	s_queuedServiceCount.fetch_add(1, std::memory_order_release);
+	s_queuedServices.Push(service);
+	s_servicesWake->Notify();
+	nexThread_wake();
 }
 
 bool nexThread_isCurrentThread()
 {
-	if (_nexThreadLaunched == false)
-		return false;
-	return std::this_thread::get_id() == nexThreadId;
+	return t_isNexThread;
 }

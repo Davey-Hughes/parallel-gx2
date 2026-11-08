@@ -95,7 +95,7 @@ jobs:
         # handoffs take no lock, nor AX's use of the audio devices, guest
         # time reads, the CPU's data cache flush reports, or the Vulkan
         # pipeline cache's compile threads, the worker queues or the shader
-        # compile pool
+        # compile pool; nor does the nex thread poll
         run: ./tools/check_gpu_waits.sh
 
       - name: "curl_compat against local servers"

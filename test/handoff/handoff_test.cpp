@@ -50,6 +50,9 @@
 //  - ClaimTicket (the shader compile pool): a queued shader is compiled once,
 //    by a pool thread or by the thread that needs it now, never after it was
 //    destroyed, and a destroyed one's ticket left in the queue is harmless;
+//  - nexWait (the nex thread and the online logins): a wait ends when a packet
+//    arrives or the wake is signalled from another thread, well before its
+//    timeout, and runs to the timeout otherwise;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -71,6 +74,7 @@
 #include "util/helpers/MpscQueue.h"
 #include "util/helpers/MpmcQueue.h"
 #include "util/helpers/ClaimTicket.h"
+#include "Cemu/nex/nexWait.h"
 #include "Cafe/HW/Espresso/PPCTimerClock.h"
 #include <set>
 #include "libretro.h"
@@ -1141,6 +1145,54 @@ static void TestClaimTicket()
 	CHECK(compiled > 0);
 }
 
+// --- nex waits ------------------------------------------------------------
+
+static void TestNexWait()
+{
+#ifdef _WIN32
+	WSADATA wsa;
+	WSAStartup(MAKEWORD(2, 2), &wsa);
+#endif
+	using clock = std::chrono::steady_clock;
+	nexWait::Wake wake;
+	CHECK(wake.sock != nexWait::kNoSocket);
+	// Nothing: the timeout
+	{
+		const auto start = clock::now();
+		CHECK(!nexWait::WaitForSockets(nullptr, 0, 50, &wake));
+		CHECK(clock::now() - start >= std::chrono::milliseconds(40));
+	}
+	// A wake from another thread ends a long wait at once
+	for (int i = 0; i < 20; i++)
+	{
+		std::thread t([&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			wake.Signal();
+		});
+		const auto start = clock::now();
+		CHECK(nexWait::WaitForSockets(nullptr, 0, 30000, &wake));
+		t.join();
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+	}
+	// Drained: the next wait is not ended by an old wake
+	wake.Signal();
+	wake.Signal();
+	CHECK(nexWait::WaitForSockets(nullptr, 0, 1000, &wake));
+	CHECK(!nexWait::WaitForSockets(nullptr, 0, 20, &wake));
+	// A packet on a service's socket ends it too, without the wake
+	{
+		nexWait::Wake service; // a loopback socket like any other
+		std::thread t([&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			service.Signal();
+		});
+		const auto start = clock::now();
+		CHECK(nexWait::WaitForSockets(&service.sock, 1, 30000, nullptr));
+		t.join();
+		CHECK(clock::now() - start < std::chrono::seconds(10));
+	}
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -1362,6 +1414,7 @@ int main()
 	TestMpscQueue();
 	TestMpmcQueue();
 	TestClaimTicket();
+	TestNexWait();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

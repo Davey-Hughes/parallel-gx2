@@ -167,9 +167,8 @@ void nexService::callMethod(uint8 protocolId, uint32 methodId, nexPacketBuffer* 
 	queueRequest.nexServiceResponse = nexServiceResponse;
 	queueRequest.custom = custom;
 	queueRequest.callHandlerIfError = callHandlerIfError;
-	mtx_queuedRequests.lock();
-	queuedRequests.push_back(queueRequest);
-	mtx_queuedRequests.unlock();
+	queuedRequests.Push(std::move(queueRequest));
+	nexThread_wake(); // the nex thread sends it now, not at its next pass
 }
 
 void nexService::callMethod(uint8 protocolId, uint32 methodId, nexPacketBuffer* parameter, std::function<void(nexServiceResponse_t*)> cb, bool callHandlerIfError)
@@ -181,9 +180,8 @@ void nexService::callMethod(uint8 protocolId, uint32 methodId, nexPacketBuffer* 
 	queueRequest.nexServiceResponse = nullptr;
 	queueRequest.cb2 = cb;
 	queueRequest.callHandlerIfError = callHandlerIfError;
-	mtx_queuedRequests.lock();
-	queuedRequests.push_back(queueRequest);
-	mtx_queuedRequests.unlock();
+	queuedRequests.Push(std::move(queueRequest));
+	nexThread_wake(); // the nex thread sends it now, not at its next pass
 }
 
 void nexService::processQueuedRequest(queuedRequest_t* queuedRequest)
@@ -240,13 +238,7 @@ void nexService::update()
 	{
 		updateNexServiceConnection();
 		// process any queued requests
-		mtx_queuedRequests.lock();
-		for (auto& request : queuedRequests)
-		{
-			processQueuedRequest(&request);
-		}
-		queuedRequests.clear();
-		mtx_queuedRequests.unlock();
+		queuedRequests.TakeAll([this](queuedRequest_t&& request) { processQueuedRequest(&request); });
 	}
 	else if (connectionState == STATE_CONNECTING)
 	{
@@ -629,7 +621,9 @@ nexService* nex_secureLogin(prudpAuthServerInfo* authServerInfo, const char* acc
 			delete prudpSecureSock;
 			return nullptr;
 		}
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		// asleep until the server answers or the handshake's clock is due
+		const SOCKET sock = prudpSecureSock->GetSocket();
+		nexWaitForSockets(&sock, 1, 100, false);
 	}
 	// create nex service layer
 	nexService* nex = new nexService(prudpSecureSock);
@@ -657,6 +651,10 @@ nexService* nex_secureLogin(prudpAuthServerInfo* authServerInfo, const char* acc
 			cemuLog_log(LogType::Force, "NEX: Connection error while registering");
 			break;
 		}
+		// asleep until the answer arrives, rather than spinning on it as
+		// upstream does - a host core at 100% for the length of a round trip
+		const SOCKET sock = nex->getPRUDPConnection()->GetSocket();
+		nexWaitForSockets(&sock, 1, 100, false);
 	}
 	if (secureRegisterExData.isSuccessful == false)
 	{
@@ -674,7 +672,8 @@ nexService* nex_establishSecureConnection(uint32 authServerIp, uint16 authServer
 	while (authConnection->getState() == nexService::STATE_CONNECTING)
 	{
 		authConnection->update();
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		const SOCKET sock = authConnection->getPRUDPConnection()->GetSocket();
+		nexWaitForSockets(&sock, 1, 100, false);
 	}
 	if (authConnection->getState() != nexService::STATE_CONNECTED)
 	{

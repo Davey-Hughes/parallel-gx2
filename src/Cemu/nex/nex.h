@@ -1,6 +1,6 @@
 #pragma once
 #include "nexTypes.h"
-#include <mutex>
+#include "util/helpers/MpscList.h"
 
 const int NEX_PROTOCOL_AUTHENTICATION = 0xA;
 const int NEX_PROTOCOL_SECURE = 0xB;
@@ -112,8 +112,8 @@ private:
 	// auth
 	bool isSecureService;
 	// request queue
-	std::mutex mtx_queuedRequests;
-	std::vector<queuedRequest_t> queuedRequests;
+	// from any thread to the one that updates this service: no lock
+	MpscList<queuedRequest_t> queuedRequests;
 };
 
 nexService* nex_establishSecureConnection(uint32 authServerIp, uint16 authServerPort, const char* accessKey, uint32 pid, const char* nexPassword, const char* nexToken);
