@@ -88,12 +88,6 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/PPCScheduler.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/PPCSchedulerLLE.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/PPCTimer.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64AVX.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64BMI.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64FPU.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64Gen.cpp \
-	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64GenFPU.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/IML/IMLAnalyzer.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/IML/IMLDebug.cpp \
 	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/IML/IMLInstruction.cpp \
@@ -402,6 +396,7 @@ ifeq ($(OS_LINUX),1)
 endif
 ifeq ($(OS_ANDROID),1)
    CORE_SOURCES_CXX += \
+	$(CORE_DIR)/src/Common/ExceptionHandler/ELFSymbolTable.cpp \
 	$(SRC_DIR)/util/Fiber/FiberAndroid.cpp \
 	$(CORE_DIR)/src/util/SystemInfo/SystemInfoLinux.cpp
    CORE_SOURCES_ASM += \
@@ -473,6 +468,19 @@ ifeq ($(HAVE_LIBUSB),1)
    CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/OS/libs/nsyshid/BackendLibusb.cpp \
 	$(CORE_DIR)/src/util/libusbWrapper/libusbWrapper.cpp
+endif
+# Each recompiler backend only for its own architecture: the core links all
+# its objects into one library, not a static one as standalone does, so the
+# x64 backend in an arm64 core clashes with the AArch64 one
+# (PPCRecompiler_virtualHLE).
+ifeq ($(ARCH_X86_64),1)
+   CORE_SOURCES_CXX += \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64AVX.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64BMI.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64FPU.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64Gen.cpp \
+	$(CORE_DIR)/src/Cafe/HW/Espresso/Recompiler/BackendX64/BackendX64GenFPU.cpp
 endif
 ifeq ($(ARCH_ARM64),1)
    CORE_SOURCES_CXX += \
@@ -617,10 +625,12 @@ ifeq ($(ARCH_X86_64),1)
 	common/x86/ih264_chroma_intra_pred_filters_ssse3.c common/x86/ih264_deblk_chroma_ssse3.c common/x86/ih264_deblk_luma_ssse3.c common/x86/ih264_ihadamard_scaling_sse42.c common/x86/ih264_ihadamard_scaling_ssse3.c common/x86/ih264_inter_pred_filters_ssse3.c common/x86/ih264_iquant_itrans_recon_dc_ssse3.c common/x86/ih264_iquant_itrans_recon_sse42.c common/x86/ih264_iquant_itrans_recon_ssse3.c common/x86/ih264_luma_intra_pred_filters_ssse3.c common/x86/ih264_mem_fns_ssse3.c common/x86/ih264_padding_ssse3.c common/x86/ih264_resi_trans_quant_sse42.c common/x86/ih264_weighted_pred_sse42.c decoder/x86/ih264d_function_selector.c decoder/x86/ih264d_function_selector_sse42.c decoder/x86/ih264d_function_selector_ssse3.c)
    IH264D_FLAGS += -I$(IH264D_DIR)/common/x86 -I$(IH264D_DIR)/decoder/x86
 else
+   # Not the a9q selector: it is 32-bit ARM's, and with ARMV8 the selector
+   # only calls the av8 one.
    IH264D_SOURCES_C += $(addprefix $(IH264D_DIR)/, \
-	decoder/arm/ih264d_function_selector_a9q.c decoder/arm/ih264d_function_selector_av8.c decoder/arm/ih264d_function_selector.c)
+	decoder/arm/ih264d_function_selector_av8.c decoder/arm/ih264d_function_selector.c)
    IH264D_SOURCES_ASM += $(addprefix $(IH264D_DIR)/, \
-	common/armv8/ih264_deblk_chroma_av8.s common/armv8/ih264_deblk_luma_av8.s common/armv8/ih264_default_weighted_pred_av8.s common/armv8/ih264_ihadamard_scaling_av8.s common/armv8/ih264_inter_pred_chroma_av8.s common/armv8/ih264_inter_pred_filters_luma_horz_av8.s common/armv8/ih264_inter_pred_filters_luma_vert_av8.s common/armv8/ih264_inter_pred_luma_copy_av8.s common/armv8/ih264_inter_pred_luma_horz_hpel_vert_hpel_av8.s common/armv8/ih264_inter_pred_luma_horz_hpel_vert_qpel_av8.s common/armv8/ih264_inter_pred_luma_horz_qpel_av8.s common/armv8/ih264_inter_pred_luma_horz_qpel_vert_hpel_av8.s common/armv8/ih264_inter_pred_luma_horz_qpel_vert_qpel_av8.s common/armv8/ih264_inter_pred_luma_vert_qpel_av8.s common/armv8/ih264_intra_pred_chroma_av8.s common/armv8/ih264_intra_pred_luma_16x16_av8.s common/armv8/ih264_intra_pred_luma_4x4_av8.s common/armv8/ih264_intra_pred_luma_8x8_av8.s common/armv8/ih264_iquant_itrans_recon_av8.s common/armv8/ih264_iquant_itrans_recon_dc_av8.s common/armv8/ih264_mem_fns_neon_av8.s common/armv8/ih264_padding_neon_av8.s common/armv8/ih264_resi_trans_quant_av8.s common/armv8/ih264_weighted_bi_pred_av8.s common/armv8/ih264_weighted_pred_av8.s common/armv8/macos_arm_symbol_aliases.s)
+	common/armv8/ih264_deblk_chroma_av8.s common/armv8/ih264_deblk_luma_av8.s common/armv8/ih264_default_weighted_pred_av8.s common/armv8/ih264_ihadamard_scaling_av8.s common/armv8/ih264_inter_pred_chroma_av8.s common/armv8/ih264_inter_pred_filters_luma_horz_av8.s common/armv8/ih264_inter_pred_filters_luma_vert_av8.s common/armv8/ih264_inter_pred_luma_copy_av8.s common/armv8/ih264_inter_pred_luma_horz_hpel_vert_hpel_av8.s common/armv8/ih264_inter_pred_luma_horz_hpel_vert_qpel_av8.s common/armv8/ih264_inter_pred_luma_horz_qpel_av8.s common/armv8/ih264_inter_pred_luma_horz_qpel_vert_hpel_av8.s common/armv8/ih264_inter_pred_luma_horz_qpel_vert_qpel_av8.s common/armv8/ih264_inter_pred_luma_vert_qpel_av8.s common/armv8/ih264_intra_pred_chroma_av8.s common/armv8/ih264_intra_pred_luma_16x16_av8.s common/armv8/ih264_intra_pred_luma_4x4_av8.s common/armv8/ih264_intra_pred_luma_8x8_av8.s common/armv8/ih264_iquant_itrans_recon_av8.s common/armv8/ih264_iquant_itrans_recon_dc_av8.s common/armv8/ih264_mem_fns_neon_av8.s common/armv8/ih264_padding_neon_av8.s common/armv8/ih264_resi_trans_quant_av8.s common/armv8/ih264_weighted_bi_pred_av8.s common/armv8/ih264_weighted_pred_av8.s)
    ifeq ($(OS_APPLE),1)
       IH264D_SOURCES_ASM += $(IH264D_DIR)/common/armv8/macos_arm_symbol_aliases.s
    endif
