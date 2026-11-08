@@ -1,20 +1,12 @@
 #pragma once
 
 // Shared DRC (GamePad) display-layout state used by both the libretro entry
-// point (CemuLibretroLinux.cpp) and the renderers that present into the
-// libretro window FBO / shared Vulkan image. Defined in CemuLibretroLinux.cpp.
+// point (CemuLibretro.cpp) and the renderers that present into the libretro
+// window FBO / shared Vulkan image. Defined in CemuLibretro.cpp.
 
 
 #include "Common/precompiled.h"
-
-enum class LibretroScreenLayout
-{
-	Tv,               // TV only
-	GamePad,          // GamePad only
-	SideBySide,       // primary 80% + secondary 20%, side-by-side
-	TopBottom,        // primary 70% on top, secondary 30% on bottom
-	PictureInPicture, // primary fullscreen, secondary as small corner overlay
-};
+#include "LibretroViews.h"
 
 extern LibretroScreenLayout g_libretroScreenLayout;
 extern bool g_libretroDRCPositionSwapped;

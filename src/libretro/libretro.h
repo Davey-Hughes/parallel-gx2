@@ -1758,6 +1758,53 @@ struct retro_vfs_authorized_locations
 };
 #endif
 
+/* Backported from a newer libretro.h, the same way: RetroArch's video views
+ * (libretro/RetroArch#19811), which let the frontend lay out the screens of a
+ * frame packed with more than one. Guarded so that syncing the header later
+ * does not collide with it. */
+#ifndef RETRO_ENVIRONMENT_SET_VIDEO_VIEWS
+#define RETRO_ENVIRONMENT_SET_VIDEO_VIEWS (95 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+#define RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS (96 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+
+#define RETRO_VIDEO_VIEWS_STATUS_PRESENTS (1 << 0)
+#define RETRO_VIDEO_VIEWS_STATUS_STEREO   (1 << 1)
+#define RETRO_VIDEO_VIEWS_STATUS_HMD      (1 << 2)
+
+#define RETRO_VIDEO_VIEW_EYE_NONE  0
+#define RETRO_VIDEO_VIEW_EYE_LEFT  1
+#define RETRO_VIDEO_VIEW_EYE_RIGHT 2
+
+#define RETRO_VIDEO_VIEWS_MAX      8
+#define RETRO_VIDEO_VIEWS_FLAG_TRACKED (1 << 0)
+
+enum retro_vr_reference_space {
+   RETRO_VR_REFERENCE_SPACE_LOCAL = 0,
+   RETRO_VR_REFERENCE_SPACE_STAGE = 1,
+   RETRO_VR_REFERENCE_SPACE_DUMMY = INT_MAX
+};
+
+struct retro_video_view
+{
+   unsigned x;
+   unsigned y;
+   unsigned width;
+   unsigned height;
+   unsigned screen;
+   unsigned eye;
+   float aspect_ratio;
+};
+
+struct retro_video_views
+{
+   const struct retro_video_view *views;
+   unsigned num_views;
+   unsigned flags;
+   enum retro_vr_reference_space reference_space;
+   unsigned recommended_view_width;
+   unsigned recommended_view_height;
+};
+#endif
+
 /**
  * Returns an interface that the core can use
  * to set the state of any accessible device LEDs.
