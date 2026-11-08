@@ -3,6 +3,7 @@
 #include "input/InputManager.h"
 #include "input/motion/MotionSample.h"
 #include "input/api/ControllerState.h"
+#include "util/helpers/SeqlockValue.h"
 
 namespace pugi
 {
@@ -102,8 +103,10 @@ public:
 	virtual bool has_low_battery() { return false; }
 
 	const ControllerState& calibrate();
+	// update_state is for the thread that polls the controller (retro_run's);
+	// get_state is for everyone, and returns the latest one whole
 	const ControllerState& update_state();
-	const ControllerState& get_state() const { return m_last_state; }
+	ControllerState get_state() const { return m_published_state.Load(); }
 	const ControllerState& get_default_state() { return is_calibrated() ? m_default_state : calibrate(); }
 	virtual ControllerState raw_state() = 0;
 
@@ -112,7 +115,7 @@ public:
 	float get_axis_value(uint64 button) const;
 	virtual bool has_axis() const { return true; }
 
-	bool use_motion() { return has_motion() && m_settings.motion; }
+	bool use_motion() { return has_motion() && m_settings.Load().motion; }
 	virtual bool has_motion() { return false; }
 	virtual MotionSample get_motion_sample() { return {}; }
 
@@ -159,13 +162,16 @@ protected:
 	std::string m_uuid;
 	std::string m_display_name;
 
-	ControllerState m_last_state{};
+	ControllerState m_last_state{}; // the polling thread's own
+	// what the game's threads read, with no lock (SeqlockValue.h)
+	SeqlockValue<ControllerState> m_published_state;
 
 	bool m_is_calibrated = false;
 	ControllerState m_default_state{};
 
-	mutable std::mutex m_settings_mutex;
-	Settings m_settings{};
+	// Written by the polling thread and the configuration, read by the game's
+	// threads: no lock (SeqlockValue.h; one writer at a time)
+	SeqlockValue<Settings> m_settings;
 };
 
 template<std::derived_from<ControllerProviderBase> TProvider>

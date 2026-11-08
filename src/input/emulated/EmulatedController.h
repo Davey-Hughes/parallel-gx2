@@ -9,6 +9,7 @@ class ControllerBase;
 #include "input/api/InputAPI.h"
 
 #include "util/helpers/helpers.h"
+#include "util/helpers/RcuCell.h"
 
 // mapping = wii u controller button id
 // button = api button id
@@ -106,7 +107,10 @@ protected:
 	size_t m_player_index;
 	std::string m_profile_name = "default";
 
-	mutable std::shared_mutex m_mutex;
+	// What the game's threads read, every pad read of every frame, published
+	// by whoever changes the controllers or mappings - no lock either way
+	// (RcuCell.h). m_controllers and m_mappings below are the writers' own
+	// copy, which only the code that sets controllers up reads.
 	std::vector<std::shared_ptr<ControllerBase>> m_controllers;
 
 	float get_axis_value(uint64 mapping) const;
@@ -118,6 +122,22 @@ protected:
 		uint64 button;
 	};
 	std::unordered_map<uint64, Mapping> m_mappings;
+
+	struct State
+	{
+		std::vector<std::shared_ptr<ControllerBase>> controllers;
+		std::unordered_map<uint64, Mapping> mappings;
+	};
+	RcuCell<State> m_state;
+	// Changes the writers' copy with change(), then publishes it
+	template<typename TChange>
+	void ChangeState(TChange change)
+	{
+		m_state.Write([&] {
+			change();
+			return State{m_controllers, m_mappings};
+		});
+	}
 
 	bool m_homebutton_down = false;
 };

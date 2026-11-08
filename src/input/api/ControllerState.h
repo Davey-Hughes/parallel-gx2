@@ -1,7 +1,9 @@
 ﻿#pragma once
 
 #include <glm/vec2.hpp>
-#include "util/helpers/fspinlock.h"
+#include <array>
+#include <span>
+#include <vector>
 
 enum class PositionVisibility {
 	NONE = 0,
@@ -9,113 +11,73 @@ enum class PositionVisibility {
 	PARTIAL = 2
 };
 
-// helper class for storing and managing button press states in a thread-safe manner
+// The buttons pressed in one controller state: a bit per button id. A plain
+// value - no lock - because a ControllerState belongs to one thread at a time:
+// the one building it, and then everyone through ControllerBase's published
+// copy (SeqlockValue), which they read whole. Was a vector of ids under a
+// spinlock every reader of every button took.
 struct ControllerButtonState
 {
-	ControllerButtonState() = default;
-	ControllerButtonState(const ControllerButtonState& other)
-	{
-		this->m_pressedButtons = other.m_pressedButtons;
-	}
-
-	ControllerButtonState(ControllerButtonState&& other)
-	{
-		this->m_pressedButtons = std::move(other.m_pressedButtons);
-	}
+	static constexpr uint32 kMaxButtons = 256;
 
 	void SetButtonState(uint32 buttonId, bool isPressed)
 	{
-		std::lock_guard _l(this->m_spinlock);
+		if (buttonId >= kMaxButtons)
+			return;
 		if (isPressed)
-		{
-			if (std::find(m_pressedButtons.cbegin(), m_pressedButtons.cend(), buttonId) != m_pressedButtons.end())
-				return;
-			m_pressedButtons.emplace_back(buttonId);
-		}
+			m_bits[buttonId / 64] |= 1ull << (buttonId % 64);
 		else
-		{
-			std::erase(m_pressedButtons, buttonId);
-		}
+			m_bits[buttonId / 64] &= ~(1ull << (buttonId % 64));
 	}
 
-	// set multiple buttons at once within a single lock interval
+	// set multiple buttons at once
 	void SetPressedButtons(std::span<uint32> buttonList)
 	{
-		std::lock_guard _l(this->m_spinlock);
 		for (auto& buttonId : buttonList)
-		{
-			if (std::find(m_pressedButtons.cbegin(), m_pressedButtons.cend(), buttonId) == m_pressedButtons.end())
-				m_pressedButtons.emplace_back(buttonId);
-		}
+			SetButtonState(buttonId, true);
 	}
 
 	// returns true if pressed
 	bool GetButtonState(uint32 buttonId) const
 	{
-		std::lock_guard _l(this->m_spinlock);
-		bool r = std::find(m_pressedButtons.cbegin(), m_pressedButtons.cend(), buttonId) != m_pressedButtons.cend();
-		return r;
+		if (buttonId >= kMaxButtons)
+			return false;
+		return (m_bits[buttonId / 64] >> (buttonId % 64)) & 1;
 	}
 
 	// remove pressed state for all pressed buttons in buttonsToUnset
 	void UnsetButtons(const ControllerButtonState& buttonsToUnset)
 	{
-		std::scoped_lock _l(this->m_spinlock, buttonsToUnset.m_spinlock);
-		for (auto it = m_pressedButtons.begin(); it != m_pressedButtons.end();)
-		{
-			if (std::find(buttonsToUnset.m_pressedButtons.cbegin(), buttonsToUnset.m_pressedButtons.cend(), *it) == buttonsToUnset.m_pressedButtons.cend())
-			{
-				++it;
-				continue;
-			}
-			it = m_pressedButtons.erase(it);
-		}
+		for (size_t i = 0; i < m_bits.size(); i++)
+			m_bits[i] &= ~buttonsToUnset.m_bits[i];
 	}
 
 	// returns true if no buttons are pressed
 	bool IsIdle() const
 	{
-		std::lock_guard _l(this->m_spinlock);
-		const bool r = m_pressedButtons.empty();
-		return r;
-	}
-
-	std::vector<uint32> GetButtonList() const
-	{
-		std::lock_guard _l(this->m_spinlock);
-		std::vector<uint32> copy = m_pressedButtons;
-		return copy;
-	}
-
-	bool operator==(const ControllerButtonState& other) const
-	{
-		std::scoped_lock _l(this->m_spinlock, other.m_spinlock);
-		auto& otherButtons = other.m_pressedButtons;
-		if (m_pressedButtons.size() != otherButtons.size())
+		for (uint64 w : m_bits)
 		{
-			return false;
-		}
-		for (auto& buttonId : m_pressedButtons)
-		{
-			if (std::find(otherButtons.cbegin(), otherButtons.cend(), buttonId) == otherButtons.cend())
-			{
+			if (w)
 				return false;
-			}
 		}
 		return true;
 	}
 
-	ControllerButtonState& operator=(ControllerButtonState&& other)
+	std::vector<uint32> GetButtonList() const
 	{
-		cemu_assert_debug(!other.m_spinlock.is_locked());
-		std::scoped_lock _l(this->m_spinlock, other.m_spinlock);
-		this->m_pressedButtons = std::move(other.m_pressedButtons);
-		return *this;
+		std::vector<uint32> list;
+		for (uint32 id = 0; id < kMaxButtons; id++)
+		{
+			if (GetButtonState(id))
+				list.emplace_back(id);
+		}
+		return list;
 	}
 
+	bool operator==(const ControllerButtonState& other) const { return m_bits == other.m_bits; }
+
 private:
-	std::vector<uint32> m_pressedButtons; // since only very few buttons are pressed at a time, using a vector with linear scan is more efficient than a set/map
-	mutable FSpinlock m_spinlock;
+	std::array<uint64, kMaxButtons / 64> m_bits{};
 };
 
 struct ControllerState

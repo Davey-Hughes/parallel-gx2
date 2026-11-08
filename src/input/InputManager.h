@@ -1,5 +1,7 @@
 #pragma once
 
+#include "util/helpers/RcuCell.h"
+
 #include "input/api/Libretro/LibretroControllerProvider.h"
 
 #include "input/emulated/VPADController.h"
@@ -91,9 +93,32 @@ private:
 
 	std::array<std::vector<ControllerProviderPtr>, InputAPI::MAX> m_api_available{ };
 
-	mutable std::shared_mutex m_mutex;
+	// The writers' copy - set_controller and delete_controller, which only
+	// the code that sets controllers up calls - and what they publish for
+	// the game's threads to read with no lock (RcuCell.h)
 	std::array<EmulatedControllerPtr, kMaxVPADControllers> m_vpad;
 	std::array<EmulatedControllerPtr, kMaxWPADControllers> m_wpad;
+	struct Pads
+	{
+		std::array<EmulatedControllerPtr, kMaxVPADControllers> vpad;
+		std::array<EmulatedControllerPtr, kMaxWPADControllers> wpad;
+	};
+	RcuCell<Pads> m_pads;
+	template<typename TChange>
+	auto ChangePads(TChange change)
+	{
+		using R = decltype(change());
+		if constexpr (std::is_void_v<R>)
+		{
+			m_pads.Write([&] { change(); return Pads{m_vpad, m_wpad}; });
+		}
+		else
+		{
+			R result{};
+			m_pads.Write([&] { result = change(); return Pads{m_vpad, m_wpad}; });
+			return result;
+		}
+	}
 
 	std::array<bool, kMaxController> m_is_gameprofile_set{};
 

@@ -26,7 +26,8 @@ HDRS := $(SRC)/libretro/LibretroAudioRing.h $(SRC)/Cafe/HW/Latte/Core/LatteGpuWa
 	$(SRC)/audio/AudioDevicesGate.h $(SRC)/util/helpers/AtomicPageSet.h \
 	$(SRC)/Cafe/HW/Espresso/PPCTimerClock.h $(SRC)/util/helpers/AtomicPtrBag.h \
 	$(SRC)/util/helpers/MpscQueue.h $(SRC)/util/helpers/MpmcQueue.h \
-	$(SRC)/util/helpers/ClaimTicket.h $(SRC)/Cemu/nex/nexWait.h
+	$(SRC)/util/helpers/ClaimTicket.h $(SRC)/Cemu/nex/nexWait.h \
+	$(SRC)/util/helpers/RcuCell.h
 
 handoff_test$(EXE): $(CXX_SRCS) $(C_SRCS) $(HDRS)
 	$(CC) $(FLAGS) -std=gnu99 -c $(LRC)/queues/retro_spsc.c -o retro_spsc.o

@@ -64,6 +64,7 @@ const ControllerState& ControllerBase::update_state()
 	WindowSystem::CaptureInput(result, m_last_state);
 
 	m_last_state = std::move(result);
+	m_published_state.Store(m_last_state);
 	return m_last_state;
 }
 
@@ -122,7 +123,9 @@ bool ControllerBase::operator==(const ControllerBase& c) const
 
 float ControllerBase::get_axis_value(uint64 button) const
 {
-	if (m_last_state.buttons.GetButtonState(button))
+	// on the game's threads: the published state, read whole
+	const ControllerState state = m_published_state.Load();
+	if (state.buttons.GetButtonState(button))
 	{
 		if (button <= kButtonNoneAxisMAX || !has_axis())
 			return 1.0f;
@@ -131,24 +134,24 @@ float ControllerBase::get_axis_value(uint64 button) const
 		{
 		case kAxisXP:
 		case kAxisXN:
-			return std::abs(m_last_state.axis.x);
+			return std::abs(state.axis.x);
 		case kAxisYP:
 		case kAxisYN:
-			return std::abs(m_last_state.axis.y);
+			return std::abs(state.axis.y);
 
 		case kRotationXP:
 		case kRotationXN:
-			return std::abs(m_last_state.rotation.x);
+			return std::abs(state.rotation.x);
 		case kRotationYP:
 		case kRotationYN:
-			return std::abs(m_last_state.rotation.y);
+			return std::abs(state.rotation.y);
 
 		case kTriggerXP:
 		case kTriggerXN:
-			return std::abs(m_last_state.trigger.x);
+			return std::abs(state.trigger.x);
 		case kTriggerYP:
 		case kTriggerYN:
-			return std::abs(m_last_state.trigger.y);
+			return std::abs(state.trigger.y);
 		}
 	}
 
@@ -199,42 +202,47 @@ std::string ControllerBase::get_button_name(uint64 button) const
 
 ControllerBase::Settings ControllerBase::get_settings() const
 {
-	std::scoped_lock lock(m_settings_mutex);
-	return m_settings;
+	return m_settings.Load();
 }
 
 void ControllerBase::set_settings(const Settings& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings = settings;
+	m_settings.Store(settings);
 }
 
+// A field at a time: the setters are the polling thread's and the
+// configuration's, one at a time, so reading back what is there is safe
 void ControllerBase::set_axis_settings(const AxisSetting& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.axis = settings;
+	Settings s = m_settings.Load();
+	s.axis = settings;
+	m_settings.Store(s);
 }
 
 void ControllerBase::set_rotation_settings(const AxisSetting& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.rotation = settings;
+	Settings s = m_settings.Load();
+	s.rotation = settings;
+	m_settings.Store(s);
 }
 
 void ControllerBase::set_trigger_settings(const AxisSetting& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.trigger = settings;
+	Settings s = m_settings.Load();
+	s.trigger = settings;
+	m_settings.Store(s);
 }
 
 void ControllerBase::set_rumble(float rumble)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.rumble = rumble;
+	Settings s = m_settings.Load();
+	s.rumble = rumble;
+	m_settings.Store(s);
 }
 
 void ControllerBase::set_use_motion(bool state)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.motion = state;
+	Settings s = m_settings.Load();
+	s.motion = state;
+	m_settings.Store(s);
 }

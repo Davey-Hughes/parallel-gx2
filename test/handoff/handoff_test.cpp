@@ -53,6 +53,10 @@
 //  - nexWait (the nex thread and the online logins): a wait ends when a packet
 //    arrives or the wake is signalled from another thread, well before its
 //    timeout, and runs to the timeout otherwise;
+//  - RcuCell (the emulated controllers and their mappings): readers never see
+//    a value freed or half-built, however many are inside when a writer
+//    replaces it, and a writer is never held up by readers that came after
+//    it;
 //  - the thread-started flag the IOSU services start their threads with lets
 //    the starter go as soon as the thread says so, not on a clock;
 //  - RetroArch's audio thread, pulling from an empty ring, sleeps until the
@@ -75,6 +79,7 @@
 #include "util/helpers/MpmcQueue.h"
 #include "util/helpers/ClaimTicket.h"
 #include "Cemu/nex/nexWait.h"
+#include "util/helpers/RcuCell.h"
 #include "Cafe/HW/Espresso/PPCTimerClock.h"
 #include <set>
 #include "libretro.h"
@@ -1193,6 +1198,61 @@ static void TestNexWait()
 	}
 }
 
+// --- RcuCell ------------------------------------------------------------------
+
+struct RcuTestValue
+{
+	std::vector<uint64_t> items;
+	uint64_t canary = 0x600DF00D;
+	RcuTestValue() = default;
+	explicit RcuTestValue(uint64_t n) : items(16, n) {}
+	RcuTestValue(const RcuTestValue&) = default;
+	~RcuTestValue() { canary = 0; }
+};
+
+static void TestRcuCell()
+{
+	RcuCell<RcuTestValue> cell(RcuTestValue(0));
+	std::atomic_bool stop{false}, bad{false};
+	std::atomic<uint64_t> reads{0};
+	std::vector<std::thread> readers;
+	for (int r = 0; r < 4; r++)
+		readers.emplace_back([&] {
+			uint64_t last = 0;
+			while (!stop.load(std::memory_order_relaxed))
+			{
+				const auto v = cell.Read();
+				if (v->canary != 0x600DF00D || v->items.size() != 16)
+				{
+					bad.store(true);
+					continue;
+				}
+				const uint64_t n = v->items[0];
+				for (uint64_t x : v->items)
+					if (x != n)
+						bad.store(true);
+				if (n < last)
+					bad.store(true); // went back to a replaced value
+				last = n;
+				reads.fetch_add(1, std::memory_order_relaxed);
+			}
+		});
+	// Writers, two taking turns, while the readers never stop coming
+	std::thread writer2([&] {
+		for (uint64_t i = 1; i <= 2000; i++)
+			cell.Write([] { return RcuTestValue(0); });
+	});
+	writer2.join();
+	for (uint64_t i = 1; i <= 5000; i++)
+		cell.Write([i] { return RcuTestValue(i); });
+	stop.store(true);
+	for (auto& t : readers)
+		t.join();
+	CHECK(!bad.load());
+	CHECK(reads.load() > 0);
+	CHECK(cell.Read()->items[0] == 5000);
+}
+
 // --- thread-started flag ------------------------------------------------
 
 static void TestThreadStartedFlag()
@@ -1415,6 +1475,7 @@ int main()
 	TestMpmcQueue();
 	TestClaimTicket();
 	TestNexWait();
+	TestRcuCell();
 	TestAudioRingSpans(2);
 	TestAudioRingSpans(6);
 	TestAudioRingThreads();

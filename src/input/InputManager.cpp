@@ -562,34 +562,38 @@ EmulatedControllerPtr InputManager::set_controller(EmulatedControllerPtr control
 		c->connect();
 	}*/
 
-	std::scoped_lock lock(m_mutex);
-	switch (controller->type())
-	{
-	case EmulatedController::Type::VPAD:
-		for (auto& pad : m_vpad)
+	const bool placed = ChangePads([&] {
+		switch (controller->type())
 		{
-			if (!pad)
+		case EmulatedController::Type::VPAD:
+			for (auto& pad : m_vpad)
 			{
-				pad.swap(controller);
-				return prev_controller;
+				if (!pad)
+				{
+					pad.swap(controller);
+					return true;
+				}
 			}
-		}
 
-		break;
+			break;
 
-	default:
-		for (auto& pad : m_wpad)
-		{
-			if (!pad)
+		default:
+			for (auto& pad : m_wpad)
 			{
-				pad.swap(controller);
-				return prev_controller;
+				if (!pad)
+				{
+					pad.swap(controller);
+					return true;
+				}
 			}
-		}
 
-		break;
-	}
-	
+			break;
+		}
+		return false;
+	});
+	if (placed)
+		return prev_controller;
+
 	cemu_assert_debug(false);
 	return prev_controller;
 }
@@ -622,14 +626,14 @@ EmulatedControllerPtr InputManager::set_controller(size_t player_index, Emulated
 
 EmulatedControllerPtr InputManager::get_controller(size_t player_index) const
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& pad : m_vpad)
+	const auto pads = m_pads.Read();
+	for (const auto& pad : pads->vpad)
 	{
 		if (pad && pad->player_index() == player_index)
 			return pad;
 	}
 
-	for (const auto& pad : m_wpad)
+	for (const auto& pad : pads->wpad)
 	{
 		if (pad && pad->player_index() == player_index)
 			return pad;
@@ -640,7 +644,7 @@ EmulatedControllerPtr InputManager::get_controller(size_t player_index) const
 
 EmulatedControllerPtr InputManager::delete_controller(size_t player_index, bool delete_profile)
 {
-	std::scoped_lock lock(m_mutex);
+	return ChangePads([&]() -> EmulatedControllerPtr {
 	for (auto& controller : m_vpad)
 	{
 		auto result = controller;
@@ -678,6 +682,7 @@ EmulatedControllerPtr InputManager::delete_controller(size_t player_index, bool 
 	}
 
 	return {};
+	});
 }
 
 
@@ -686,8 +691,7 @@ std::shared_ptr<VPADController> InputManager::get_vpad_controller(size_t index) 
 	if (index >= m_vpad.size())
 		return {};
 
-	std::shared_lock lock(m_mutex);
-	return std::dynamic_pointer_cast<VPADController>(m_vpad[index]);
+	return std::dynamic_pointer_cast<VPADController>(m_pads.Read()->vpad[index]);
 }
 
 std::shared_ptr<WPADController> InputManager::get_wpad_controller(size_t index) const
@@ -695,33 +699,33 @@ std::shared_ptr<WPADController> InputManager::get_wpad_controller(size_t index) 
 	if (index >= m_wpad.size())
 		return {};
 
-	std::shared_lock lock(m_mutex);
-	return std::dynamic_pointer_cast<WPADController>(m_wpad[index]);
+	return std::dynamic_pointer_cast<WPADController>(m_pads.Read()->wpad[index]);
 }
 
 std::pair<size_t, size_t> InputManager::get_controller_count() const
 {
-	std::shared_lock lock(m_mutex);
-	const size_t vpad = std::count_if(m_vpad.cbegin(), m_vpad.cend(), [](const auto& v) { return v != nullptr; });
-	const size_t wpad = std::count_if(m_wpad.cbegin(), m_wpad.cend(), [](const auto& v) { return v != nullptr; });
+	const auto pads = m_pads.Read();
+	const size_t vpad = std::count_if(pads->vpad.cbegin(), pads->vpad.cend(), [](const auto& v) { return v != nullptr; });
+	const size_t wpad = std::count_if(pads->wpad.cbegin(), pads->wpad.cend(), [](const auto& v) { return v != nullptr; });
 	return std::make_pair(vpad, wpad);
 }
 
 void InputManager::on_device_changed()
 {
-	std::shared_lock lock(m_mutex);
-	for (auto& pad : m_vpad)
 	{
-		if (pad)
-			pad->connect();
-	}
+		const auto pads = m_pads.Read();
+		for (auto& pad : pads->vpad)
+		{
+			if (pad)
+				pad->connect();
+		}
 
-	for (auto& pad : m_wpad)
-	{
-		if (pad)
-			pad->connect();
+		for (auto& pad : pads->wpad)
+		{
+			if (pad)
+				pad->connect();
+		}
 	}
-	lock.unlock();
 
 	EventService::instance().signal<Events::ControllerChanged>();
 }
@@ -921,14 +925,14 @@ std::optional<glm::ivec2> InputManager::get_right_down_mouse_info(bool* is_pad)
 
 void InputManager::update_controllers()
 {
-	std::shared_lock lock(m_mutex);
-	for (auto& pad : m_vpad)
+	const auto pads = m_pads.Read();
+	for (auto& pad : pads->vpad)
 	{
 		if (pad)
 			pad->update();
 	}
 
-	for (auto& pad : m_wpad)
+	for (auto& pad : pads->wpad)
 	{
 		if (pad)
 			pad->update();
@@ -956,8 +960,10 @@ void InputManager::Shutdown()
         m_update_thread.join();
     }
 
-    for (auto& pad : m_vpad) pad.reset();
-	for (auto& pad : m_wpad) pad.reset();
+	ChangePads([&] {
+		for (auto& pad : m_vpad) pad.reset();
+		for (auto& pad : m_wpad) pad.reset();
+	});
 
 	for (auto& providers : m_api_available)
 	{

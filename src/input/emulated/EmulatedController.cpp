@@ -37,8 +37,8 @@ EmulatedController::EmulatedController(size_t player_index)
 
 void EmulatedController::calibrate()
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		controller->calibrate();
 	}
@@ -46,8 +46,8 @@ void EmulatedController::calibrate()
 
 void EmulatedController::connect()
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		controller->connect();
 	}
@@ -55,8 +55,8 @@ void EmulatedController::connect()
 
 void EmulatedController::update()
 {
-	std::shared_lock lock(m_mutex);
-	for(const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for(const auto& controller : state->controllers)
 	{
 		controller->update();
 	}
@@ -64,8 +64,8 @@ void EmulatedController::update()
 
 void EmulatedController::controllers_update_states()
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		controller->update_state();
 	}
@@ -74,8 +74,8 @@ void EmulatedController::controllers_update_states()
 void EmulatedController::start_rumble()
 {
 	m_rumble = true;
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		controller->start_rumble();
 	}
@@ -88,8 +88,8 @@ void EmulatedController::stop_rumble()
 
 	m_rumble = false;
 
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		controller->stop_rumble();
 	}
@@ -97,20 +97,20 @@ void EmulatedController::stop_rumble()
 
 bool EmulatedController::is_battery_low() const
 {
-	std::shared_lock lock(m_mutex);
-	return std::any_of(m_controllers.cbegin(), m_controllers.cend(), [](const auto& c) {return c->has_low_battery(); });
+	const auto state = m_state.Read();
+	return std::any_of(state->controllers.cbegin(), state->controllers.cend(), [](const auto& c) {return c->has_low_battery(); });
 }
 
 bool EmulatedController::has_motion() const
 {
-	std::shared_lock lock(m_mutex);
-	return std::any_of(m_controllers.cbegin(), m_controllers.cend(), [](const auto& c) {return c->use_motion(); });
+	const auto state = m_state.Read();
+	return std::any_of(state->controllers.cbegin(), state->controllers.cend(), [](const auto& c) {return c->use_motion(); });
 }
 
 MotionSample EmulatedController::get_motion_data() const
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		if (controller->use_motion())
 			return controller->get_motion_sample();
@@ -122,8 +122,8 @@ MotionSample EmulatedController::get_motion_data() const
 bool EmulatedController::has_second_motion() const
 {
 	int motion = 0;
-	std::shared_lock lock(m_mutex);
-	for(const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for(const auto& controller : state->controllers)
 	{
 		if(controller->use_motion())
 		{
@@ -138,8 +138,8 @@ bool EmulatedController::has_second_motion() const
 MotionSample EmulatedController::get_second_motion_data() const
 {
 	int motion = 0;
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		if (controller->use_motion())
 		{
@@ -158,14 +158,14 @@ MotionSample EmulatedController::get_second_motion_data() const
 
 bool EmulatedController::has_position() const
 {
-	std::shared_lock lock(m_mutex);
-	return std::any_of(m_controllers.cbegin(), m_controllers.cend(), [](const auto& c) {return c->has_position(); });
+	const auto state = m_state.Read();
+	return std::any_of(state->controllers.cbegin(), state->controllers.cend(), [](const auto& c) {return c->has_position(); });
 }
 
 glm::vec2 EmulatedController::get_position() const
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		if (controller->has_position())
 			return controller->get_position();
@@ -176,8 +176,8 @@ glm::vec2 EmulatedController::get_position() const
 
 glm::vec2 EmulatedController::get_prev_position() const
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		if (controller->has_position())
 			return controller->get_prev_position();
@@ -188,8 +188,8 @@ glm::vec2 EmulatedController::get_prev_position() const
 
 PositionVisibility EmulatedController::GetPositionVisibility() const
 {
-	std::shared_lock lock(m_mutex);
-	for (const auto& controller : m_controllers)
+	const auto state = m_state.Read();
+	for (const auto& controller : state->controllers)
 	{
 		if (controller->has_position())
 			return controller->GetPositionVisibility();
@@ -201,45 +201,44 @@ void EmulatedController::add_controller(std::shared_ptr<ControllerBase> controll
 {
 	controller->connect();
 
-	std::scoped_lock lock(m_mutex);
-	m_controllers.emplace_back(std::move(controller));
+	ChangeState([&] { m_controllers.emplace_back(std::move(controller)); });
 }
 
 void EmulatedController::remove_controller(const std::shared_ptr<ControllerBase>& controller)
 {
-	std::scoped_lock lock(m_mutex);
-	const auto it = std::find(m_controllers.cbegin(), m_controllers.cend(), controller);
-	if (it != m_controllers.cend())
-	{
-		m_controllers.erase(it);
-
-		for(auto m = m_mappings.begin(); m != m_mappings.end();)
+	ChangeState([&] {
+		const auto it = std::find(m_controllers.cbegin(), m_controllers.cend(), controller);
+		if (it != m_controllers.cend())
 		{
-			if(auto mc = m->second.controller.lock())
-			{
-				if(*mc == *controller)
-				{
-					m = m_mappings.erase(m);
-					continue;
-				}
-			}
+			m_controllers.erase(it);
 
-			++m;
+			for(auto m = m_mappings.begin(); m != m_mappings.end();)
+			{
+				if(auto mc = m->second.controller.lock())
+				{
+					if(*mc == *controller)
+					{
+						m = m_mappings.erase(m);
+						continue;
+					}
+				}
+
+				++m;
+			}
 		}
-	}
+	});
 }
 
 void EmulatedController::clear_controllers()
 {
-	std::scoped_lock lock(m_mutex);
-	m_controllers.clear();
+	ChangeState([&] { m_controllers.clear(); });
 }
 
 float EmulatedController::get_axis_value(uint64 mapping) const
 {
-	std::shared_lock lock(m_mutex);
-	const auto it = m_mappings.find(mapping);
-	if (it != m_mappings.cend())
+	const auto state = m_state.Read();
+	const auto it = state->mappings.find(mapping);
+	if (it != state->mappings.cend())
 	{
 		if (const auto controller = it->second.controller.lock()) {
 			return controller->get_axis_value(it->second.button);
@@ -251,9 +250,9 @@ float EmulatedController::get_axis_value(uint64 mapping) const
 
 bool EmulatedController::is_mapping_down(uint64 mapping) const
 {
-	std::shared_lock lock(m_mutex);
-	const auto it = m_mappings.find(mapping);
-	if (it != m_mappings.cend())
+	const auto state = m_state.Read();
+	const auto it = state->mappings.find(mapping);
+	if (it != state->mappings.cend())
 	{
 		if (const auto controller = it->second.controller.lock())
 			return controller->get_state().buttons.GetButtonState(it->second.button);
@@ -264,9 +263,9 @@ bool EmulatedController::is_mapping_down(uint64 mapping) const
 
 std::string EmulatedController::get_mapping_name(uint64 mapping) const
 {
-	std::shared_lock lock(m_mutex);
-	const auto it = m_mappings.find(mapping);
-	if (it != m_mappings.cend())
+	const auto state = m_state.Read();
+	const auto it = state->mappings.find(mapping);
+	if (it != state->mappings.cend())
 	{
 		if (const auto controller = it->second.controller.lock()) {
 			return controller->get_button_name(it->second.button);
@@ -278,9 +277,9 @@ std::string EmulatedController::get_mapping_name(uint64 mapping) const
 
 std::shared_ptr<ControllerBase> EmulatedController::get_mapping_controller(uint64 mapping) const
 {
-	std::shared_lock lock(m_mutex);
-	const auto it = m_mappings.find(mapping);
-	if (it != m_mappings.cend())
+	const auto state = m_state.Read();
+	const auto it = state->mappings.find(mapping);
+	if (it != state->mappings.cend())
 	{
 		if (const auto controller = it->second.controller.lock()) {
 			return controller;
@@ -292,21 +291,18 @@ std::shared_ptr<ControllerBase> EmulatedController::get_mapping_controller(uint6
 
 void EmulatedController::delete_mapping(uint64 mapping)
 {
-	std::scoped_lock lock(m_mutex);
-	m_mappings.erase(mapping);
+	ChangeState([&] { m_mappings.erase(mapping); });
 }
 
 void EmulatedController::clear_mappings()
 {
-	std::scoped_lock lock(m_mutex);
-	m_mappings.clear();
+	ChangeState([&] { m_mappings.clear(); });
 }
 
 void EmulatedController::set_mapping(uint64 mapping, const std::shared_ptr<ControllerBase>& controller,
                                      uint64 button)
 {
-	std::scoped_lock lock(m_mutex);
-	m_mappings[mapping] = { controller, button };
+	ChangeState([&] { m_mappings[mapping] = { controller, button }; });
 }
 
 bool EmulatedController::operator==(const EmulatedController& o) const

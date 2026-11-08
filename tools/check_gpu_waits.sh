@@ -39,7 +39,10 @@
 # (ClaimTicket.h), and whose compile state is atomic. Online, the nex thread
 # and the logins sleep in select() on their sockets and a wake socket
 # (nexWait.h) instead of polling every millisecond - or, registering for
-# secure access, spinning.
+# secure access, spinning. And the emulated controllers the game reads every
+# frame - which controllers, their mappings (RcuCell.h), their state and
+# settings (SeqlockValue.h) - instead of a shared_mutex, a mutex and a
+# spinlock per read.
 #
 # The waits on the way from loading a title to its first frame sleep until
 # what they wait for has happened (LatteGpuWake, ThreadStartedFlag), not by
@@ -134,8 +137,11 @@ for f in src/Cemu/Logging/CemuLogging.cpp src/Cemu/Logging/LogFileSink.h \
 	src/Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h src/util/helpers/AtomicPtrBag.h \
 	src/util/helpers/MpscQueue.h src/util/helpers/MpmcQueue.h \
 	src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.cpp src/util/helpers/ClaimTicket.h \
-	src/Cemu/nex/nex.cpp src/Cemu/nex/nex.h src/Cemu/nex/nexThread.cpp src/Cemu/nex/nexWait.h; do
-	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique)_lock|lock_guard|condition_variable|sleep_for|FSpinlock'; then
+	src/Cemu/nex/nex.cpp src/Cemu/nex/nex.h src/Cemu/nex/nexThread.cpp src/Cemu/nex/nexWait.h \
+	src/input/emulated/EmulatedController.cpp src/input/emulated/EmulatedController.h \
+	src/input/api/Controller.cpp src/input/api/Controller.h src/input/api/ControllerState.h \
+	src/util/helpers/RcuCell.h; do
+	if pp $f | grep -qE 'std::[a-z_]*mutex|std::(shared|unique|scoped)_lock|lock_guard|condition_variable|sleep_for|FSpinlock'; then
 		echo "$f: takes a lock or sleeps again"; fail=1
 	fi
 done
@@ -151,6 +157,11 @@ for f in src/Cafe/HW/Latte/Renderer/Vulkan/RendererShaderVk.cpp src/Cafe/HW/Latt
 		echo "$f: the shader compile pool waits on a mutex again"; fail=1
 	fi
 done
+# InputManager keeps upstream's mouse and touch locks, which the libretro
+# build never takes; the controller lists are lock-free
+if pp src/input/InputManager.cpp | grep -q 'lock(m_mutex)'; then
+	echo "src/input/InputManager.cpp: the controller lists take a lock again"; fail=1
+fi
 # VulkanRenderer still has a reader-writer lock around vkCreateGraphicsPipelines
 # for the cache saver, so only the spinlock is checked for there
 for f in src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h src/Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp; do
