@@ -383,11 +383,6 @@ struct retro_core_option_v2_definition option_defs_us[] = {
 		},
 		"2"
 	},
-	// Default Screen, standalone's one window, except where the frontend knows
-	// video views: there libretro_publish_core_options makes it Both Screens,
-	// as the frontend then shows the GamePad where the user puts it - under
-	// the TV, in a window of its own, on another display - which is what
-	// standalone's separate GamePad window is for.
 	{
 		"cemu_screen_layout1",
 		"Layout 1",

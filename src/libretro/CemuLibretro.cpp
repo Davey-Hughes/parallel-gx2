@@ -922,11 +922,6 @@ static bool s_views_status_supported = true;
 static bool s_views_map_sent = false;
 // The frontend refused the last map, which was logged.
 static bool s_views_map_rejected = false;
-// The frontend answered RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS when the
-// options were declared, which makes Both Screens the first layout's default
-// (libretro_publish_core_options). Never cleared: RetroArch also calls
-// retro_set_environment with callbacks that answer nothing.
-static bool s_frontend_knows_views = false;
 
 static retro_hw_render_callback s_hw_render{};
 
@@ -2698,16 +2693,13 @@ static bool RETRO_CALLCONV libretro_update_options_display()
 
 static void libretro_read_screen_layout_options()
 {
-	LibretroScreenLayout defaults[kMaxScreenLayouts] = {
+	static const LibretroScreenLayout defaults[kMaxScreenLayouts] = {
 		LibretroScreenLayout::Tv,
 		LibretroScreenLayout::GamePad,
 		LibretroScreenLayout::SideBySide,
 		LibretroScreenLayout::TopBottom,
 		LibretroScreenLayout::PictureInPicture,
 	};
-	// As declared (libretro_publish_core_options)
-	if (s_frontend_knows_views)
-		defaults[0] = LibretroScreenLayout::BothScreens;
 
 	unsigned count = 2;
 	if (const char* v = libretro_get_option_value("cemu_number_of_screen_layouts"))
@@ -3949,27 +3941,6 @@ static void libretro_publish_core_options(retro_environment_t cb, bool withRepla
 	static const std::vector<struct retro_core_option_v2_definition> pristine(
 		std::begin(option_defs_us), std::end(option_defs_us));
 	std::copy(pristine.begin(), pristine.end(), option_defs_us);
-
-	// Layout 1 is Both Screens where the frontend knows video views, and
-	// Default Screen, standalone's one window, where it does not. With views
-	// the frontend shows the GamePad where the user puts it - under the TV, in
-	// a window of its own, on another display - which is what standalone's
-	// separate GamePad window is for. Whether it knows the call, not
-	// RETRO_VIDEO_VIEWS_STATUS_PRESENTS: RetroArch sets that once its video
-	// driver is up, after the options are declared. A value already saved is
-	// the user's and stays.
-	{
-		unsigned status = 0;
-		if (cb(RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS, &status))
-			s_frontend_knows_views = true;
-	}
-	if (s_frontend_knows_views)
-		for (struct retro_core_option_v2_definition& def : option_defs_us)
-			if (def.key && !strcmp(def.key, "cemu_screen_layout1"))
-			{
-				def.default_value = "Both Screens";
-				break;
-			}
 
 	// The frontend copies what it needs, but nothing here promises when, so
 	// the strings stay in the deque.
