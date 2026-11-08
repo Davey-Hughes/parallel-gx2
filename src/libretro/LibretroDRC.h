@@ -23,6 +23,11 @@ void LibretroDRC_ComputeViewport(bool padView,
 	int dstWidth, int dstHeight,
 	int& outX, int& outY, int& outWidth, int& outHeight);
 
+// Where the screens sit in a composite of dstWidth x dstHeight: its size, then
+// the TV's and the GamePad's viewports. The renderers keep what is in the
+// composite while this stays the same, and clear it when it changes.
+std::array<int, 10> LibretroDRC_Arrangement(int dstWidth, int dstHeight);
+
 // The screen whose size the frame handed to the frontend takes: the GamePad's
 // with the GamePad Screen layout, both packed with Both Screens, the TV's with
 // every other one.

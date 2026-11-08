@@ -1381,6 +1381,16 @@ void LibretroDRC_DefaultOutputSize(uint32& width, uint32& height)
 	height = s_out_height;
 }
 
+std::array<int, 10> LibretroDRC_Arrangement(int dstWidth, int dstHeight)
+{
+	std::array<int, 10> arrangement{dstWidth, dstHeight};
+	LibretroDRC_ComputeViewport(false, dstWidth, dstHeight,
+		arrangement[2], arrangement[3], arrangement[4], arrangement[5]);
+	LibretroDRC_ComputeViewport(true, dstWidth, dstHeight,
+		arrangement[6], arrangement[7], arrangement[8], arrangement[9]);
+	return arrangement;
+}
+
 void LibretroDRC_ComputeViewport(bool padView,
 	int dstWidth, int dstHeight,
 	int& outX, int& outY, int& outWidth, int& outHeight)

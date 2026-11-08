@@ -503,7 +503,8 @@ void VulkanRenderer::CreatePresentationImage(uint32 width, uint32 height)
 	m_presentImageHasContent = false;
 	// Nothing is in it: the next blit clears it, even in the middle of a frame
 	// (Both Screens makes a new one when the second picture's size changes)
-	m_presentLastFrameCounter = ~0u;
+	m_presentArrangement.fill(-1);
+	m_cursorSaved = false;
 	cemuLog_log(LogType::Force, "[Vulkan-LR] Created presentation image {}x{} ({})", width, height,
 		m_presentImageIsSRGB ? "sRGB, blits encode into it" : "UNORM, blits go in as they are");
 }
@@ -616,6 +617,10 @@ VulkanRenderer::~VulkanRenderer()
 		vkDestroyBuffer(m_logicalDevice, m_cursorBuffer, nullptr);
 	if (m_cursorBufferMemory != VK_NULL_HANDLE)
 		vkFreeMemory(m_logicalDevice, m_cursorBufferMemory, nullptr);
+	if (m_cursorSaveBuffer != VK_NULL_HANDLE)
+		vkDestroyBuffer(m_logicalDevice, m_cursorSaveBuffer, nullptr);
+	if (m_cursorSaveBufferMemory != VK_NULL_HANDLE)
+		vkFreeMemory(m_logicalDevice, m_cursorSaveBufferMemory, nullptr);
 	FreeRetiredPresentationImages(true);
 	// make sure compilation threads have been shut down
 	RendererShaderVk::Shutdown();
@@ -2461,7 +2466,21 @@ void VulkanRenderer::DrawLibretroCursor()
 		vkUnmapMemory(m_logicalDevice, m_cursorBufferMemory);
 	}
 
+	// The arrow is 12 x 19 cells at a scale of height / 720, so 132 x 209
+	// pixels for an 8192-high image: what is under it fits 256 x 256.
+	constexpr uint32 kSaveSide = 256;
+	if (m_cursorSaveBuffer == VK_NULL_HANDLE)
+	{
+		if (!memoryManager->CreateBuffer(kSaveSide * kSaveSide * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_cursorSaveBuffer, m_cursorSaveBufferMemory))
+		{
+			m_cursorSaveBuffer = VK_NULL_HANDLE;
+			return; // an arrow that cannot come off again is not drawn
+		}
+	}
+
 	std::vector<VkBufferImageCopy> regions;
+	int boxX0 = (int)m_presentWidth, boxY0 = (int)m_presentHeight, boxX1 = 0, boxY1 = 0;
 	for (int row = 0; row < g_libretro_cursor_rows; row++)
 	{
 		const char* line = g_libretro_cursor_shape[row];
@@ -2490,28 +2509,56 @@ void VulkanRenderer::DrawLibretroCursor()
 						r.imageOffset.y = y;
 						regions.push_back(r);
 					}
+					boxX0 = std::min(boxX0, x0);
+					boxY0 = std::min(boxY0, y0);
+					boxX1 = std::max(boxX1, x1);
+					boxY1 = std::max(boxY1, y1);
 				}
 			}
 			col += run;
 		}
 	}
-	if (regions.empty())
+	if (regions.empty() || boxX0 < 0 || boxY0 < 0 ||
+		(uint32)(boxX1 - boxX0) > kSaveSide || (uint32)(boxY1 - boxY0) > kSaveSide)
 		return;
 
 	draw_endRenderPass();
 	VkImageSubresourceRange fullRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-	VkImageMemoryBarrier toDst{};
-	toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-	toDst.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-	toDst.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	toDst.image = m_presentImage;
-	toDst.subresourceRange = fullRange;
+	VkImageMemoryBarrier toSrc{};
+	toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	toSrc.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	toSrc.image = m_presentImage;
+	toSrc.subresourceRange = fullRange;
 	vkCmdPipelineBarrier(m_state.currentCommandBuffer,
 		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+	// What the arrow covers, to go back before the next frame's first blit.
+	// A frame only gets here after a blit, and its first blit put back what
+	// the last arrow covered, so the saved pixels never hold an older arrow.
+	m_cursorSaveRegion = {};
+	m_cursorSaveRegion.bufferOffset = 0;
+	m_cursorSaveRegion.bufferRowLength = 0; // tightly packed
+	m_cursorSaveRegion.bufferImageHeight = 0;
+	m_cursorSaveRegion.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+	m_cursorSaveRegion.imageOffset = {boxX0, boxY0, 0};
+	m_cursorSaveRegion.imageExtent = {(uint32)(boxX1 - boxX0), (uint32)(boxY1 - boxY0), 1};
+	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, m_presentImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		m_cursorSaveBuffer, 1, &m_cursorSaveRegion);
+	m_cursorSaved = true;
+
+	VkImageMemoryBarrier toDst = toSrc;
+	toDst.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	toDst.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	vkCmdPipelineBarrier(m_state.currentCommandBuffer,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 		0, 0, nullptr, 0, nullptr, 1, &toDst);
 
 	vkCmdCopyBufferToImage(m_state.currentCommandBuffer, m_cursorBuffer, m_presentImage,
@@ -2660,14 +2707,21 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 
 		if (m_presentImage != VK_NULL_HANDLE)
 		{
-			// Composite TV + DRC into m_presentImage. The image is reused
-			// across libretro frames; LatteGPUState.frameCounter (incremented
-			// once per Cemu frame in LatteRenderTarget_itHLESwapScanBuffer) is
-			// the source of truth for "which frame is being scanned out". The
-			// first blit per frame transitions from VK_IMAGE_LAYOUT_UNDEFINED
-			// and clears the image to opaque black so SBS / TopBottom gaps are
-			// deterministic regardless of TV/DRC order. Subsequent blits in
-			// the same frame preserve prior content (SHADER_READ_ONLY → TRANSFER_DST).
+			// Composite TV + DRC into m_presentImage, which is to the
+			// frontend what the scan buffers are to a Wii U: a screen shows
+			// what was last scanned out to it until the game scans out to it
+			// again. Many titles scan out the GamePad less often than the TV
+			// (Wind Waker HD), and an image cleared every frame blacked the
+			// GamePad out in each frame that had only a TV picture - a GamePad
+			// screen flashing black under Both Screens. So a blit keeps what is
+			// already in the image, and the image is cleared to opaque black
+			// only when it is new or the screens move in it (another layout,
+			// GamePad Position Swapped, another size), which leaves the gaps
+			// around the screens black. Picture in Picture is the exception:
+			// the TV's blit covers the inset. The mouse cursor drawn into the
+			// image (DrawLibretroCursor) comes off again before the next
+			// frame's first blit, or each frame without a GamePad picture
+			// would leave another arrow behind.
 			UpdatePresentationImageColorSpace();
 			FreeRetiredPresentationImages(false);
 			if (LibretroDRC_OutputFollowsScreen(padView))
@@ -2678,9 +2732,9 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 			}
 
 			m_presentImageHasContent = true;
-			const uint32 currentFrame = LatteGPUState.frameCounter;
-			const bool preservePrior = (m_presentLastFrameCounter == currentFrame);
-			m_presentLastFrameCounter = currentFrame;
+			const std::array<int, 10> arrangement = LibretroDRC_Arrangement((int)m_presentWidth, (int)m_presentHeight);
+			const bool preservePrior = (arrangement == m_presentArrangement);
+			m_presentArrangement = arrangement;
 
 			// Blit source texture to presentation image (GPU-only, no CPU readback)
 			draw_endRenderPass();
@@ -2699,7 +2753,7 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 			VkImageSubresourceRange fullRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
 			VkImageMemoryBarrier dstBarrier{};
 			dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-			dstBarrier.srcAccessMask = preservePrior ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_SHADER_READ_BIT;
+			dstBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
 			dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 			dstBarrier.oldLayout = preservePrior ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 			dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -2709,11 +2763,11 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 				0, 0, nullptr, 0, nullptr, 1, &dstBarrier);
 
-			// First blit of the frame starts from UNDEFINED — pixels outside
-			// this blit's dst rect (and outside any follow-up screen blit)
-			// would otherwise read garbage. SBS/TopBottom leave visible gaps
-			// around the letterboxed sub-rects, so wipe the whole image to
-			// opaque black before the blit.
+			// A new image, or one whose screens moved, starts from UNDEFINED:
+			// pixels outside the screens' rectangles would otherwise read
+			// garbage, or what an earlier arrangement left there. SBS,
+			// TopBottom and Both Screens leave visible gaps around their
+			// screens, so wipe the whole image to opaque black before the blit.
 			if (!preservePrior)
 			{
 				VkClearColorValue clearColor{};
@@ -2736,6 +2790,35 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 				vkCmdPipelineBarrier(m_state.currentCommandBuffer,
 					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 					0, 0, nullptr, 0, nullptr, 1, &clearBarrier);
+				m_cursorSaved = false; // the arrow went with the clear
+			}
+			else if (m_cursorSaved)
+			{
+				// The first blit of a frame after a cursor was drawn: what was
+				// under the arrow goes back before any picture goes in, so a
+				// screen this frame does not scan out shows no arrow from the last
+				VkMemoryBarrier savedBarrier{};
+				savedBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+				savedBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				savedBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+				vkCmdPipelineBarrier(m_state.currentCommandBuffer,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+					0, 1, &savedBarrier, 0, nullptr, 0, nullptr);
+				vkCmdCopyBufferToImage(m_state.currentCommandBuffer, m_cursorSaveBuffer, m_presentImage,
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &m_cursorSaveRegion);
+
+				VkImageMemoryBarrier restoreBarrier{};
+				restoreBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+				restoreBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				restoreBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+				restoreBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+				restoreBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+				restoreBarrier.image = m_presentImage;
+				restoreBarrier.subresourceRange = fullRange;
+				vkCmdPipelineBarrier(m_state.currentCommandBuffer,
+					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+					0, 0, nullptr, 0, nullptr, 1, &restoreBarrier);
+				m_cursorSaved = false;
 			}
 
 			// Pick destination sub-region from the DRC layout. Top-left origin

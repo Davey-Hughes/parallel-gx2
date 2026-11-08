@@ -1,5 +1,6 @@
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #include "WindowSystem.h"
+#include "libretro/LibretroDRC.h"
 
 #include "Cafe/HW/Latte/Core/LatteRingBuffer.h"
 #include "Cafe/HW/Latte/Core/LatteDraw.h"
@@ -601,18 +602,22 @@ void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	// When both screens are shown (Side by Side, Top Bottom, Picture in
 	// Picture, Both Screens) they share this one backbuffer, and the GamePad
 	// blit asks for a clear: it wiped the TV image drawn just before, so only
-	// the GamePad screen was ever seen. Clear once per frame, before whichever
-	// screen comes first, as the Vulkan path does with its presentation image -
-	// and again when the backbuffer was made anew in the middle of the frame
-	// (Both Screens, when the second picture's size changes), whose contents
-	// are undefined until then.
-	if (GLCanvas_ShouldRenderScreen(!padView))
+	// the GamePad screen was ever seen. The backbuffer keeps what each screen
+	// last showed instead, as the Vulkan path's presentation image does: a
+	// title that scans out the GamePad less often than the TV (Wind Waker HD)
+	// left it black in every frame with only a TV picture while it was cleared
+	// each frame. (Picture in Picture excepted: there the TV picture covers the
+	// inset.) It is cleared when the screens move in it, a single-screen layout
+	// in between included, and when it was made anew (Both Screens, when the
+	// second picture's size changes), whose contents are undefined until then.
 	{
-		static uint32 s_lastClearedFrame = ~0u;
+		const std::array<int, 10> arrangement = LibretroDRC_Arrangement(windowWidth, windowHeight);
+		static std::array<int, 10> s_lastArrangement{};
 		static uint32 s_lastClearedGeneration = ~0u;
-		clearBackground = s_lastClearedFrame != LatteGPUState.frameCounter ||
-			s_lastClearedGeneration != s_libretro_fbo_generation;
-		s_lastClearedFrame = LatteGPUState.frameCounter;
+		if (GLCanvas_ShouldRenderScreen(!padView))
+			clearBackground = s_lastArrangement != arrangement ||
+				s_lastClearedGeneration != s_libretro_fbo_generation;
+		s_lastArrangement = arrangement;
 		s_lastClearedGeneration = s_libretro_fbo_generation;
 	}
 

@@ -629,11 +629,11 @@ public:
 	bool m_libretroFramePending = false;
 	uint32 m_presentWidth = 0;
 	uint32 m_presentHeight = 0;
-	// Tracks the LatteGPUState.frameCounter value at which m_presentImage was
-	// last touched, so the first DrawBackbufferQuad of each frame clears it
-	// before the blit and subsequent blits in that frame preserve prior
-	// content. ~0u sentinel = no blit yet.
-	uint32 m_presentLastFrameCounter = ~0u;
+	// Where the screens were in m_presentImage when it was last blitted into:
+	// its size, then the TV's and the GamePad's rectangles. While they stay
+	// put, a blit keeps what is already there; when they move, or the image is
+	// new (all -1), the blit clears it first.
+	std::array<int, 10> m_presentArrangement{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 	// Whether the image itself is an sRGB format. The view handed to the
 	// frontend is always UNORM, so this decides one thing only: whether a blit
 	// into the image encodes linear -> sRGB on the way in. See
@@ -664,6 +664,14 @@ public:
 	// from a small buffer of white and black pixels, after the frame's blits.
 	VkBuffer m_cursorBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory m_cursorBufferMemory = VK_NULL_HANDLE;
+	// What was under the cursor last drawn into m_presentImage, put back
+	// before the next frame's first blit (DrawBackbufferQuad): the image keeps
+	// a screen's picture until the title scans it out again, and the arrow
+	// would stay in it with the picture.
+	VkBuffer m_cursorSaveBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory m_cursorSaveBufferMemory = VK_NULL_HANDLE;
+	VkBufferImageCopy m_cursorSaveRegion{};
+	bool m_cursorSaved = false;
 	void DrawLibretroCursor();
 private:
 
