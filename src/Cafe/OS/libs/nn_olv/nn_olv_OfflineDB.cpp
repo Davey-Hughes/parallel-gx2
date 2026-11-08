@@ -6,7 +6,7 @@
 #include "config/ActiveSettings.h"
 #include "Cafe/CafeSystem.h"
 #include <pugixml.hpp>
-#include <zlib.h>
+#include "util/helpers/Deflate.h"
 #include "Cafe/Filesystem/ZArchiveVFS.h"
 
 namespace nn
@@ -91,9 +91,8 @@ namespace nn
 				pOut += 4;
 			}
 			// store compressed image
-			uLongf compressedDestLen = 40960;
-			int r = compress((uint8*)downloadedPostData.downloadedDataBase.compressedMemoBody, &compressedDestLen, decompressedImage.data(), decompressedImage.size());
-			if( r != Z_OK)
+			size_t compressedDestLen = 40960;
+			if (!Deflate::Compress((uint8*)downloadedPostData.downloadedDataBase.compressedMemoBody, compressedDestLen, decompressedImage.data(), decompressedImage.size()))
 				return;
 			downloadedPostData.downloadedDataBase.compressedMemoBodySize = compressedDestLen;
 			downloadedPostData.downloadedDataBase.SetFlag(DownloadedDataBase::FLAGS::HAS_BODY_MEMO);

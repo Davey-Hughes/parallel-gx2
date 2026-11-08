@@ -26,12 +26,6 @@
 [submodule "dependencies/pugixml"]
 	path = dependencies/pugixml
 	url = https://github.com/zeux/pugixml.git
-[submodule "dependencies/zlib"]
-	path = dependencies/zlib
-	url = https://github.com/madler/zlib.git
-[submodule "dependencies/zstd"]
-	path = dependencies/zstd
-	url = https://github.com/facebook/zstd.git
 [submodule "dependencies/libusb"]
 	path = dependencies/libusb
 	url = https://github.com/libusb/libusb.git

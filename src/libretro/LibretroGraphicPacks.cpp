@@ -1,7 +1,7 @@
 #include "LibretroGraphicPacks.h"
 
 #include <cstring>
-#include <zlib.h>
+#include "util/helpers/Deflate.h"
 
 #include "config/ActiveSettings.h"
 #include "Common/FileStream.h"
@@ -42,8 +42,9 @@ void LibretroGraphicPacks_InstallBundled()
 
 	// the archive is a run of entries: path, NUL, size (4 bytes LE), data
 	std::vector<uint8> archive(g_libretro_graphic_packs_unpacked_size);
-	uLongf archiveLen = (uLongf)archive.size();
-	if (uncompress(archive.data(), &archiveLen, g_libretro_graphic_packs, (uLong)g_libretro_graphic_packs_size) != Z_OK
+	size_t archiveLen = archive.size();
+	size_t packedLen = g_libretro_graphic_packs_size;
+	if (Deflate::Uncompress(archive.data(), archiveLen, g_libretro_graphic_packs, packedLen) != Deflate::Result::Ok
 			|| archiveLen != archive.size())
 	{
 		cemuLog_log(LogType::Force, "graphic packs: the set compiled into the core could not be opened");

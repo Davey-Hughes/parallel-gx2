@@ -1,11 +1,26 @@
 #include "Cafe/HW/Latte/Common/ShaderSerializer.h"
 #include <boost/container/small_vector.hpp>
-#include <zstd.h>
-#include <zlib.h>
+#include <encodings/rzstd.h>
 
-// compression dictionary for Latte shader code, initialized on boot
-ZSTD_CDict* s_c_shaderDict{};
-ZSTD_DDict* s_d_shaderDict{};
+// compression dictionary for Latte shader code, initialized on boot. The
+// entries are Zstandard frames made with it, as standalone Cemu makes them,
+// so shader caches go between the two either way.
+rzstd_dict_t* s_shaderDict{};
+
+namespace
+{
+	// a decoder's scratch is 150 KiB: kept per thread rather than allocated per entry
+	rzstd_decoder_t* ShaderSerializer_threadDecoder()
+	{
+		struct Holder
+		{
+			rzstd_decoder_t* decoder = rzstd_decoder_new();
+			~Holder() { rzstd_decoder_free(decoder); }
+		};
+		thread_local Holder s_holder;
+		return s_holder.decoder;
+	}
+}
 
 namespace Latte
 {
@@ -14,11 +29,10 @@ namespace Latte
 		memWriter.writeBE<uint8>(1); // version
 		// compress shader using zstd level 6
 		boost::container::small_vector<uint8, 4096> compressedBuf;
-		compressedBuf.resize(ZSTD_compressBound(size));
-		ZSTD_CCtx* const cctx = ZSTD_createCCtx();
-		size_t compressedSize = ZSTD_compress_usingCDict(cctx, compressedBuf.data(), compressedBuf.size(), shaderProg, size, s_c_shaderDict);
-		ZSTD_freeCCtx(cctx);
-		cemu_assert(!ZSTD_isError(compressedSize));
+		compressedBuf.resize(rzstd_compress_bound(size));
+		size_t compressedSize = 0;
+		int r = rzstd_encode_dict(compressedBuf.data(), compressedBuf.size(), (const uint8*)shaderProg, size, 6, s_shaderDict, &compressedSize);
+		cemu_assert(r == RZSTD_PROCESS_END);
 		memWriter.writeBE<uint32>(size);
 		memWriter.writeBE<uint32>((uint32)compressedSize);
 		memWriter.writeData(compressedBuf.data(), compressedSize);
@@ -41,30 +55,29 @@ namespace Latte
 		if (memReader.hasError())
 			return false;
 		// decompress
-		ZSTD_DCtx* const dctx = ZSTD_createDCtx();
-		size_t decompressedSize = ZSTD_decompress_usingDDict(dctx, progData.data(), progData.size(), compressedShaderData.data(), compressedShaderData.size(), s_d_shaderDict);
-		ZSTD_freeDCtx(dctx);
+		rzstd_decoder_t* decoder = ShaderSerializer_threadDecoder();
+		size_t decompressedSize = 0;
+		if (!decoder || rzstd_decode_reuse_dict(decoder, progData.data(), progData.size(), compressedShaderData.data(), compressedShaderData.size(), s_shaderDict, &decompressedSize) != RZSTD_PROCESS_END)
+			return false;
 		if (decompressedSize != progSize)
 			return false;
 		return true;
 	}
 };
 
-extern const uint8 s_shaderDict[];
+extern const uint8 s_shaderDictCompressed[];
 
 RunAtCemuBoot _loadShaderCompressionDictionary([]()
 {
 	// decompress and load dict
-	static std::vector<uint8> s_shaderDictData;
-	s_shaderDictData.resize(0x1B800);
-	ZSTD_decompress(s_shaderDictData.data(), s_shaderDictData.size(), s_shaderDict, 0xA985);
-	s_c_shaderDict = ZSTD_createCDict(s_shaderDictData.data(), s_shaderDictData.size(), 6);
-	s_d_shaderDict = ZSTD_createDDict(s_shaderDictData.data(), s_shaderDictData.size());
-	cemu_assert_debug(s_c_shaderDict);
-	cemu_assert_debug(s_d_shaderDict);
+	std::vector<uint8> dictData(0x1B800);
+	size_t dictSize = 0;
+	rzstd_decode(dictData.data(), dictData.size(), s_shaderDictCompressed, 0xA985, &dictSize);
+	s_shaderDict = rzstd_dict_new(dictData.data(), dictSize);
+	cemu_assert_debug(s_shaderDict);
 });
 
-const uint8 s_shaderDict[0xA985] = // 0xA985 Uncompressed: 0x1B800
+const uint8 s_shaderDictCompressed[0xA985] = // 0xA985 Uncompressed: 0x1B800
 {
 	0x28, 0xB5, 0x2F, 0xFD, 0xA4, 0x00, 0xB8, 0x01, 0x00, 0x54, 0xD4, 0x02,
 	0x9A, 0xE6, 0xF3, 0xBF, 0x54, 0x20, 0x9C, 0x11, 0x6D, 0x3A, 0x8F, 0x30,

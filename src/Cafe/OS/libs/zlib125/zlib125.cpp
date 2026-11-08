@@ -1,6 +1,6 @@
 #include "Cafe/OS/common/OSCommon.h"
 #include "zlib125.h"
-#include "zlib.h"
+#include "zlib125_stream.h"
 
 typedef struct {
 	/* +0x00 */ MEMPTR<uint8>		next_in;     /* next input byte */
@@ -25,26 +25,123 @@ typedef struct {
 
 static_assert(sizeof(z_stream_ppc2) == 0x38);
 
-voidpf zcallocWrapper(voidpf opaque, uInt items, uInt size)
-{
-	z_stream_ppc2* zstream = (z_stream_ppc2*)opaque;
-	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-	hCPU->gpr[3] = zstream->opaque.GetMPTR();
-	hCPU->gpr[4] = items;
-	hCPU->gpr[5] = size;
-	PPCCore_executeCallbackInternal(zstream->zalloc.GetMPTR());
-	memset(memory_getPointerFromVirtualOffset(hCPU->gpr[3]), 0, items*size);
-	return memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-}
+void zlib125_zcalloc(PPCInterpreter_t* hCPU);
+void zlib125_zcfree(PPCInterpreter_t* hCPU);
 
-void zcfreeWrapper(voidpf opaque, voidpf baseIndex)
+// The host stream behind a guest z_stream is held in a small block the
+// guest's zalloc gives, where zlib kept its own state: the guest sees the
+// allocation it would have, and frees it through zfree at the end.
+namespace
 {
-	z_stream_ppc2* zstream = (z_stream_ppc2*)opaque;
-	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-	hCPU->gpr[3] = zstream->opaque.GetMPTR();
-	hCPU->gpr[4] = memory_getVirtualOffsetFromPointer(baseIndex);
-	PPCCore_executeCallbackInternal(zstream->zfree.GetMPTR());
-	return;
+	constexpr uint32 HOST_STATE_MAGIC = 0x5A484F53; // 'ZHOS'
+	constexpr uint32 HOST_STATE_SIZE = 16;          // magic, pad, host pointer
+
+	void* zlib125_guestAlloc(z_stream_ppc2* zstream, uint32 size)
+	{
+		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
+		hCPU->gpr[3] = zstream->opaque.GetMPTR();
+		hCPU->gpr[4] = 1;
+		hCPU->gpr[5] = size;
+		PPCCore_executeCallbackInternal(zstream->zalloc.GetMPTR());
+		if (hCPU->gpr[3] == MPTR_NULL)
+			return nullptr;
+		void* p = memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
+		memset(p, 0, size);
+		return p;
+	}
+
+	void zlib125_guestFree(z_stream_ppc2* zstream, void* p)
+	{
+		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
+		hCPU->gpr[3] = zstream->opaque.GetMPTR();
+		hCPU->gpr[4] = memory_getVirtualOffsetFromPointer(p);
+		PPCCore_executeCallbackInternal(zstream->zfree.GetMPTR());
+	}
+
+	zlib125::HostStream* zlib125_getHost(z_stream_ppc2* zstream)
+	{
+		if (!zstream || !zstream->state)
+			return nullptr;
+		uint8* block = (uint8*)zstream->state.GetPtr();
+		uint32 magic;
+		memcpy(&magic, block, 4);
+		if (magic != HOST_STATE_MAGIC)
+			return nullptr;
+		zlib125::HostStream* host;
+		memcpy(&host, block + 8, sizeof(host));
+		return host;
+	}
+
+	// the default allocators, for a stream whose zalloc/zfree are null
+	void zlib125_setupAllocators(z_stream_ppc2* zstream)
+	{
+		if (zstream->zalloc == nullptr)
+			zstream->zalloc = PPCInterpreter_makeCallableExportDepr(zlib125_zcalloc);
+		if (zstream->zfree == nullptr)
+			zstream->zfree = PPCInterpreter_makeCallableExportDepr(zlib125_zcfree);
+	}
+
+	sint32 zlib125_attach(z_stream_ppc2* zstream, zlib125::HostStream* host, sint32 result)
+	{
+		if (!host)
+		{
+			zstream->state = nullptr;
+			return result;
+		}
+		uint8* block = (uint8*)zlib125_guestAlloc(zstream, HOST_STATE_SIZE);
+		if (!block)
+		{
+			delete host;
+			zstream->state = nullptr;
+			return zlib125::Z_MEM_ERROR;
+		}
+		memcpy(block, &HOST_STATE_MAGIC, 4);
+		memcpy(block + 8, &host, sizeof(host));
+		zstream->state = block;
+		zstream->msg = nullptr;
+		zstream->data_type = zlib125::Z_UNKNOWN;
+		zlib125::StreamFields f = {};
+		host->Reset(f);
+		zstream->total_in = f.totalIn;
+		zstream->total_out = f.totalOut;
+		zstream->adler = f.adler;
+		return zlib125::Z_OK;
+	}
+
+	sint32 zlib125_detach(z_stream_ppc2* zstream)
+	{
+		zlib125::HostStream* host = zlib125_getHost(zstream);
+		if (!host)
+			return zlib125::Z_STREAM_ERROR;
+		delete host;
+		zlib125_guestFree(zstream, zstream->state.GetPtr());
+		zstream->state = nullptr;
+		return zlib125::Z_OK;
+	}
+
+	zlib125::StreamFields zlib125_fields(z_stream_ppc2* zstream)
+	{
+		zlib125::StreamFields f;
+		f.nextIn = zstream->next_in.GetPtr();
+		f.availIn = zstream->avail_in;
+		f.totalIn = zstream->total_in;
+		f.nextOut = zstream->next_out.GetPtr();
+		f.availOut = zstream->avail_out;
+		f.totalOut = zstream->total_out;
+		f.adler = zstream->adler;
+		return f;
+	}
+
+	void zlib125_store(z_stream_ppc2* zstream, const zlib125::StreamFields& f)
+	{
+		zstream->next_in = (uint8*)f.nextIn;
+		zstream->avail_in = f.availIn;
+		zstream->total_in = f.totalIn;
+		zstream->next_out = f.nextOut;
+		zstream->avail_out = f.availOut;
+		zstream->total_out = f.totalOut;
+		zstream->adler = f.adler;
+	}
 }
 
 void zlib125_zcalloc(PPCInterpreter_t* hCPU)
@@ -66,73 +163,15 @@ void zlib125_zcfree(PPCInterpreter_t* hCPU)
 	hCPU->instructionPointer = gCoreinitData->MEMFreeToDefaultHeap.GetMPTR();
 }
 
-void zlib125_setupHostZStream(z_stream_ppc2* input, z_stream* output, bool fixInternalStreamPtr = true)
-{
-	output->next_in = input->next_in.GetPtr();
-	output->avail_in = (uint32)input->avail_in;
-	output->total_in = (uint32)input->total_in;
-
-	output->next_out = input->next_out.GetPtr();
-	output->avail_out = (uint32)input->avail_out;
-	output->total_out = (uint32)input->total_out;
-
-	output->msg = input->msg.GetPtr();
-	output->state = (internal_state*)input->state.GetPtr();
-
-	output->zalloc = zcallocWrapper;
-	output->zfree = zcfreeWrapper;
-	output->opaque = (void*)input;
-
-	output->data_type = input->data_type;
-	output->adler = (uint32)input->adler;
-	output->reserved = (uint32)input->reserved;
-
-	if (fixInternalStreamPtr && output->state)
-	{
-		// in newer zLib versions the internal state has a pointer to the stream at the beginning, we have to update it manually
-		// todo - find better solution
-		(*(void**)(output->state)) = output;
-	}
-}
-
-void zlib125_setupUpdateZStream(z_stream* input, z_stream_ppc2* output)
-{
-	output->next_in = input->next_in;
-	output->avail_in = (uint32)input->avail_in;
-	output->total_in = (uint32)input->total_in;
-
-	output->next_out = input->next_out;
-	output->avail_out = (uint32)input->avail_out;
-	output->total_out = (uint32)input->total_out;
-
-	output->msg = input->msg;
-	output->state = (void*)input->state;
-
-	output->data_type = input->data_type;
-	output->adler = input->adler;
-	output->reserved = input->reserved;
-
-}
-
 void zlib125Export_inflateInit_(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
 	ppcDefineParamStr(version, 1);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs, false);
-
-	// setup internal memory allocator if requested
-	if (zstream->zalloc == nullptr)
-		zstream->zalloc = PPCInterpreter_makeCallableExportDepr(zlib125_zcalloc);
-	if (zstream->zfree == nullptr)
-		zstream->zfree = PPCInterpreter_makeCallableExportDepr(zlib125_zcfree);
-
-	sint32 r = inflateInit_(&hzs, version, sizeof(z_stream));
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
-
-	osLib_returnFromFunction(hCPU, r);
+	zlib125_setupAllocators(zstream);
+	sint32 r;
+	zlib125::HostStream* host = zlib125::HostStream::CreateInflate(15, &r);
+	osLib_returnFromFunction(hCPU, zlib125_attach(zstream, host, r));
 }
 
 void zlib125Export_inflateInit2_(PPCInterpreter_t* hCPU)
@@ -141,20 +180,10 @@ void zlib125Export_inflateInit2_(PPCInterpreter_t* hCPU)
 	ppcDefineParamS32(windowBits, 1);
 	ppcDefineParamStr(version, 2);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs, false);
-
-	// setup internal memory allocator if requested
-	if (zstream->zalloc == nullptr)
-		zstream->zalloc = PPCInterpreter_makeCallableExportDepr(zlib125_zcalloc);
-	if (zstream->zfree == nullptr)
-		zstream->zfree = PPCInterpreter_makeCallableExportDepr(zlib125_zcfree);
-
-	sint32 r = inflateInit2_(&hzs, windowBits, version, sizeof(z_stream));
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
-
-	osLib_returnFromFunction(hCPU, r);
+	zlib125_setupAllocators(zstream);
+	sint32 r;
+	zlib125::HostStream* host = zlib125::HostStream::CreateInflate(windowBits, &r);
+	osLib_returnFromFunction(hCPU, zlib125_attach(zstream, host, r));
 }
 
 void zlib125Export_inflate(PPCInterpreter_t* hCPU)
@@ -162,54 +191,56 @@ void zlib125Export_inflate(PPCInterpreter_t* hCPU)
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
 	ppcDefineParamS32(flushParam, 1);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = inflate(&hzs, flushParam);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
+	zlib125::HostStream* host = zlib125_getHost(zstream);
+	if (!host || host->IsDeflate())
+	{
+		osLib_returnFromFunction(hCPU, zlib125::Z_STREAM_ERROR);
+		return;
+	}
+	zlib125::StreamFields f = zlib125_fields(zstream);
+	sint32 r = host->Inflate(f, flushParam);
+	zlib125_store(zstream, f);
 	osLib_returnFromFunction(hCPU, r);
 }
 
 void zlib125Export_inflateEnd(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
-
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = inflateEnd(&hzs);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
-	osLib_returnFromFunction(hCPU, r);
+	osLib_returnFromFunction(hCPU, zlib125_detach(zstream));
 }
 
 void zlib125Export_inflateReset(PPCInterpreter_t* hCPU)
 {
-	debug_printf("inflateReset(0x%08x)\n", hCPU->gpr[3]);
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = inflateReset(&hzs);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
+	zlib125::HostStream* host = zlib125_getHost(zstream);
+	if (!host)
+	{
+		osLib_returnFromFunction(hCPU, zlib125::Z_STREAM_ERROR);
+		return;
+	}
+	zlib125::StreamFields f = zlib125_fields(zstream);
+	sint32 r = host->InflateReset(f);
+	zlib125_store(zstream, f);
+	zstream->msg = nullptr;
 	osLib_returnFromFunction(hCPU, r);
 }
 
 void zlib125Export_inflateReset2(PPCInterpreter_t* hCPU)
 {
-	debug_printf("inflateReset2(0x%08x,0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4]);
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
 	ppcDefineParamS32(windowBits, 1);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = inflateReset2(&hzs, windowBits);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
+	zlib125::HostStream* host = zlib125_getHost(zstream);
+	if (!host)
+	{
+		osLib_returnFromFunction(hCPU, zlib125::Z_STREAM_ERROR);
+		return;
+	}
+	zlib125::StreamFields f = zlib125_fields(zstream);
+	sint32 r = host->InflateReset(f, windowBits);
+	zlib125_store(zstream, f);
+	zstream->msg = nullptr;
 	osLib_returnFromFunction(hCPU, r);
 }
 
@@ -220,23 +251,11 @@ void zlib125Export_deflateInit_(PPCInterpreter_t* hCPU)
 	ppcDefineParamStr(version, 2);
 	ppcDefineParamS32(streamsize, 3);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs, false);
-
-	// setup internal memory allocator if requested
-	if (zstream->zalloc == nullptr)
-		zstream->zalloc = PPCInterpreter_makeCallableExportDepr(zlib125_zcalloc);
-	if (zstream->zfree == nullptr)
-		zstream->zfree = PPCInterpreter_makeCallableExportDepr(zlib125_zcfree);
-
-	if (streamsize != sizeof(z_stream_ppc2))
-		assert_dbg();
-
-	sint32 r = deflateInit_(&hzs, level, version, sizeof(z_stream));
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
-
-	osLib_returnFromFunction(hCPU, r);
+	zlib125_setupAllocators(zstream);
+	cemu_assert_debug(streamsize == sizeof(z_stream_ppc2));
+	sint32 r;
+	zlib125::HostStream* host = zlib125::HostStream::CreateDeflate(level, zlib125::Z_DEFLATED, 15, &r);
+	osLib_returnFromFunction(hCPU, zlib125_attach(zstream, host, r));
 }
 
 void zlib125Export_deflateInit2_(PPCInterpreter_t* hCPU)
@@ -250,41 +269,27 @@ void zlib125Export_deflateInit2_(PPCInterpreter_t* hCPU)
 	ppcDefineParamStr(version, 6);
 	ppcDefineParamS32(streamsize, 7);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs, false);
-
-	// setup internal memory allocator if requested
-	if (zstream->zalloc == nullptr)
-		zstream->zalloc = PPCInterpreter_makeCallableExportDepr(zlib125_zcalloc);
-	if (zstream->zfree == nullptr)
-		zstream->zfree = PPCInterpreter_makeCallableExportDepr(zlib125_zcfree);
-
-	// workaround for Splatoon (it allocates a too small buffer for our version of zLib and its zalloc returns NULL)
+	// Splatoon's zalloc hands out too little for zlib's own state; the
+	// default heap is what it has always been given here
 	zstream->zalloc = PPCInterpreter_makeCallableExportDepr(zlib125_zcalloc);
 	zstream->zfree = PPCInterpreter_makeCallableExportDepr(zlib125_zcfree);
-
-	if (streamsize != sizeof(z_stream_ppc2))
-		assert_dbg();
-
-	sint32 r = deflateInit2_(&hzs, level, method, windowBits, memLevel, strategy, version, sizeof(z_stream));
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
-
-	osLib_returnFromFunction(hCPU, r);
+	cemu_assert_debug(streamsize == sizeof(z_stream_ppc2));
+	sint32 r;
+	zlib125::HostStream* host = zlib125::HostStream::CreateDeflate(level, method, windowBits, &r);
+	osLib_returnFromFunction(hCPU, zlib125_attach(zstream, host, r));
 }
 
 void zlib125Export_deflateBound(PPCInterpreter_t* hCPU)
 {
-	debug_printf("deflateBound(0x%08x,0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4]);
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
-	ppcDefineParamS32(sourceLen, 1);
+	ppcDefineParamU32(sourceLen, 1);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = deflateBound(&hzs, sourceLen);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
+	zlib125::HostStream* host = zlib125_getHost(zstream);
+	uint32 r;
+	if (host && host->IsDeflate())
+		r = host->DeflateBound(sourceLen);
+	else // zlib's answer for a stream it does not know
+		r = sourceLen + ((sourceLen + 7) >> 3) + ((sourceLen + 63) >> 6) + 5 + 6;
 	osLib_returnFromFunction(hCPU, r);
 }
 
@@ -293,26 +298,28 @@ void zlib125Export_deflate(PPCInterpreter_t* hCPU)
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
 	ppcDefineParamS32(flushParam, 1);
 
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = deflate(&hzs, flushParam);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
+	zlib125::HostStream* host = zlib125_getHost(zstream);
+	if (!host || !host->IsDeflate())
+	{
+		osLib_returnFromFunction(hCPU, zlib125::Z_STREAM_ERROR);
+		return;
+	}
+	if (flushParam >= zlib125::Z_PARTIAL_FLUSH && flushParam <= zlib125::Z_FULL_FLUSH)
+	{
+		static std::atomic_bool s_warned{false};
+		if (!s_warned.exchange(true, std::memory_order_relaxed))
+			cemuLog_log(LogType::Force, "zlib125: deflate() flush {} is taken as Z_NO_FLUSH", flushParam);
+	}
+	zlib125::StreamFields f = zlib125_fields(zstream);
+	sint32 r = host->Deflate(f, flushParam);
+	zlib125_store(zstream, f);
 	osLib_returnFromFunction(hCPU, r);
 }
 
 void zlib125Export_deflateEnd(PPCInterpreter_t* hCPU)
 {
 	ppcDefineParamStructPtr(zstream, z_stream_ppc2, 0);
-
-	z_stream hzs;
-	zlib125_setupHostZStream(zstream, &hzs);
-
-	sint32 r = deflateEnd(&hzs);
-
-	zlib125_setupUpdateZStream(&hzs, zstream);
-	osLib_returnFromFunction(hCPU, r);
+	osLib_returnFromFunction(hCPU, zlib125_detach(zstream));
 }
 
 void zlib125Export_uncompress(PPCInterpreter_t* hCPU)
@@ -320,12 +327,11 @@ void zlib125Export_uncompress(PPCInterpreter_t* hCPU)
 	// Bytef * dest, uLongf * destLen, const Bytef * source, uLong sourceLen
 	uint8* memDst = memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
 	uint8* memSrc = memory_getPointerFromVirtualOffset(hCPU->gpr[5]);
-	uint32* pDestLenBE = (uint32*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
+	uint32be* pDestLen = (uint32be*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
 	uint32 sourceLen = hCPU->gpr[6];
-	uLong destLen = _swapEndianU32(*pDestLenBE);
-	sint32 r = uncompress(memDst, &destLen, memSrc, sourceLen);
-	*pDestLenBE = _swapEndianU32(destLen);
-
+	uint32 destLen = *pDestLen;
+	sint32 r = zlib125::Uncompress(memDst, &destLen, memSrc, sourceLen);
+	*pDestLen = destLen;
 	osLib_returnFromFunction(hCPU, r);
 }
 
@@ -334,11 +340,11 @@ void zlib125Export_compress(PPCInterpreter_t* hCPU)
 	// Bytef* dest, uLongf* destLen, const Bytef* source, uLong sourceLen
 	uint8* memDst = memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
 	uint8* memSrc = memory_getPointerFromVirtualOffset(hCPU->gpr[5]);
-	uint32* pDestLenBE = (uint32*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
+	uint32be* pDestLen = (uint32be*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
 	uint32 sourceLen = hCPU->gpr[6];
-	uLong destLen = _swapEndianU32(*pDestLenBE);
-	sint32 r = compress(memDst, &destLen, memSrc, sourceLen);
-	*pDestLenBE = _swapEndianU32(destLen);
+	uint32 destLen = *pDestLen;
+	sint32 r = zlib125::Compress(memDst, &destLen, memSrc, sourceLen, zlib125::Z_DEFAULT_COMPRESSION);
+	*pDestLen = destLen;
 	osLib_returnFromFunction(hCPU, r);
 }
 
@@ -347,16 +353,12 @@ void zlib125Export_crc32(PPCInterpreter_t* hCPU)
 	uint32 crc = hCPU->gpr[3];
 	uint8* buf = (uint8*)memory_getPointerFromVirtualOffsetAllowNull(hCPU->gpr[4]);
 	uint32 len = hCPU->gpr[5];
-
-	uint32 crcResult = crc32(crc, buf, len);
-
-	osLib_returnFromFunction(hCPU, crcResult);
+	osLib_returnFromFunction(hCPU, zlib125::Crc32(crc, buf, len));
 }
 
 void zlib125Export_compressBound(PPCInterpreter_t* hCPU)
 {
-	uint32 result = compressBound(hCPU->gpr[3]);
-	osLib_returnFromFunction(hCPU, result);
+	osLib_returnFromFunction(hCPU, zlib125::CompressBound(hCPU->gpr[3]));
 }
 
 namespace zlib

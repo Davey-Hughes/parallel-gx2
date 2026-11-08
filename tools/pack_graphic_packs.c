@@ -7,10 +7,10 @@
  * the folders inside Enhancements, Resolutions, Mods, Workarounds and
  * src side by side, with LICENSE.md. The archive is a run of entries,
  * each the path (UTF-8, '/'-separated, NUL-terminated), the size as
- * four bytes little-endian and the data, compressed whole with zlib.
- * Entries are sorted, so the same tree gives the same file.
+ * four bytes little-endian and the data, compressed whole as a zlib
+ * stream. Entries are sorted, so the same tree gives the same file.
  *
- * Runs on the build machine; built with zlib's deflate sources. */
+ * Runs on the build machine; built with libretro-common's deflate. */
 #include <dirent.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -18,7 +18,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "zlib.h"
+#include <encodings/deflate.h>
 
 struct entry
 {
@@ -96,7 +96,8 @@ int main(int argc, char **argv)
 {
    static const char *groups[] = { "Enhancements", "Resolutions", "Mods", "Workarounds", "src" };
    unsigned char *z;
-   uLongf z_len;
+   size_t z_len = 0, z_cap;
+   void *zs;
    uint64_t hash = 1469598103934665603ull;
    FILE *out;
    size_t i;
@@ -143,10 +144,26 @@ int main(int argc, char **argv)
    for (i = 0; i < buf_len; i++)
       hash = (hash ^ buf[i]) * 1099511628211ull;
 
-   z_len = compressBound((uLong)buf_len);
-   z = (unsigned char*)malloc(z_len ? z_len : 1);
-   if (!z || compress2(z, &z_len, buf, (uLong)buf_len, 9) != Z_OK)
+   /* stored blocks at worst: five bytes every 64 KiB, header, trailer */
+   z_cap = buf_len + (buf_len >> 12) + 64;
+   z = (unsigned char*)malloc(z_cap);
+   if (!z || !(zs = rdeflate_new(9, 15)))
       return 1;
+   rdeflate_set_in(zs, buf, buf_len);
+   rdeflate_set_out(zs, z, z_cap);
+   rdeflate_finish(zs);
+   for (;;)
+   {
+      size_t wrote = 0;
+      int st = rdeflate_process(zs, NULL, &wrote);
+      z_len += wrote;
+      if (st == RDEFLATE_PROCESS_END)
+         break;
+      if (st != RDEFLATE_PROCESS_NEXT || !wrote)
+         return 1;
+      rdeflate_set_out(zs, z + z_len, z_cap - z_len);
+   }
+   rdeflate_free(zs);
 
    if (!(out = fopen(argv[2], "wb")))
       return 1;

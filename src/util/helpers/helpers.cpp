@@ -9,7 +9,7 @@
 
 #include <boost/random/uniform_int.hpp>
 
-#include <zlib.h>
+#include <encodings/deflate.h>
 
 
 #if BOOST_OS_WINDOWS
@@ -435,39 +435,40 @@ std::string GenerateRandomString(const size_t length, const std::string_view cha
 
 std::optional<std::vector<uint8>> zlibDecompress(const std::vector<uint8>& compressed, size_t sizeHint)
 {
-	int err;
+	// zlib or gzip, told apart by the header
+	void* z = rinflate_new(47);
+	if (!z)
+		return {};
 	std::vector<uint8> decompressed;
 	size_t outWritten = 0;
-	size_t bytesPerIteration = sizeHint;
-	z_stream stream;
-	stream.zalloc = Z_NULL;
-	stream.zfree = Z_NULL;
-	stream.opaque = Z_NULL;
-	stream.avail_in = compressed.size();
-	stream.next_in = (Bytef*)compressed.data();
-	err = inflateInit2(&stream, 32); // 32 is a zlib magic value to enable header detection
-	if (err != Z_OK)
-		return {};
-
-	do
+	size_t bytesPerIteration = sizeHint ? sizeHint : 1;
+	rinflate_set_in(z, compressed.data(), compressed.size());
+	for (;;)
 	{
 		decompressed.resize(decompressed.size() + bytesPerIteration);
-		const auto availBefore = decompressed.size() - outWritten;
-		stream.avail_out = availBefore;
-		stream.next_out = decompressed.data() + outWritten;
-		err = inflate(&stream, Z_NO_FLUSH);
-		if (!(err == Z_OK || err == Z_STREAM_END))
+		rinflate_set_out(z, decompressed.data() + outWritten, decompressed.size() - outWritten);
+		size_t wrote = 0;
+		int st;
+		// the decoder keeps what it wrote before as history, wherever the output is next
+		do
 		{
-			inflateEnd(&stream);
+			size_t read = 0, more = 0;
+			st = rinflate_process(z, &read, &more);
+			wrote += more;
+			if (!read && !more)
+				break;
+		} while (st == RDEFLATE_PROCESS_NEXT && outWritten + wrote < decompressed.size());
+		outWritten += wrote;
+		if (st == RDEFLATE_PROCESS_END)
+			break;
+		if (st == RDEFLATE_PROCESS_ERROR || outWritten < decompressed.size())
+		{
+			rinflate_free(z);
 			return {};
 		}
-		outWritten += availBefore - stream.avail_out;
 		bytesPerIteration *= 2;
 	}
-	while (err != Z_STREAM_END);
-
-	inflateEnd(&stream);
-	decompressed.resize(stream.total_out);
-
+	rinflate_free(z);
+	decompressed.resize(outWritten);
 	return decompressed;
 }

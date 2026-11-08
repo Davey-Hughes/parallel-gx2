@@ -1,4 +1,3 @@
-#include <zlib.h>
 
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/Filesystem/fsc.h"
@@ -11,6 +10,7 @@
 #include "util/ChunkedHeap/ChunkedHeap.h"
 
 #include "util/crypto/crc32.h"
+#include "util/helpers/Deflate.h"
 #include "config/ActiveSettings.h"
 #include "Cafe/OS/libs/coreinit/coreinit_DynLoad.h"
 #include "COSModule.h"
@@ -354,6 +354,16 @@ RPLFileSectionEntry* RPLLoader_GetSection(RPLModule* rplLoaderContext, sint32 se
 	return &rplLoaderContext->sectionTable[sectionIndex];
 }
 
+// A compressed section's zlib stream, which must fill dst exactly and be
+// all of src. As zlib's inflate was asked, a stream that does both without
+// its trailer is taken too.
+static bool RPLLoader_InflateSection(uint8* dst, uint32 dstSize, const uint8* src, uint32 srcSize)
+{
+	size_t wrote = dstSize, read = srcSize;
+	Deflate::Result r = Deflate::Uncompress(dst, wrote, src, read);
+	return (r == Deflate::Result::Ok || r == Deflate::Result::BufferTooSmall) && wrote == dstSize && read == srcSize;
+}
+
 RPLUncompressedSection* RPLLoader_LoadUncompressedSection(RPLModule* rplLoaderContext, sint32 sectionIndex)
 {
 	const RPLFileSectionEntry* section = RPLLoader_GetSection(rplLoaderContext, sectionIndex);
@@ -398,28 +408,14 @@ RPLUncompressedSection* RPLLoader_LoadUncompressedSection(RPLModule* rplLoaderCo
 			delete uSection;
 			return nullptr;
 		}
-		int ret;
-		z_stream strm;
-		strm.zalloc = Z_NULL;
-		strm.zfree = Z_NULL;
-		strm.opaque = Z_NULL;
-		ret = inflateInit(&strm);
-		if (ret == Z_OK)
+		uSection->sectionData.resize(uncompressedSize);
+		if (!RPLLoader_InflateSection(uSection->sectionData.data(), uncompressedSize,
+				rplLoaderContext->RPLRawData.data() + (uint32)section->fileOffset + 4, (uint32)section->sectionSize - 4))
 		{
-			strm.avail_in = (uint32)section->sectionSize - 4;
-			strm.next_in = rplLoaderContext->RPLRawData.data() + (uint32)section->fileOffset + 4;
-			strm.avail_out = uncompressedSize;
-			uSection->sectionData.resize(uncompressedSize);
-			strm.next_out = uSection->sectionData.data();
-			ret = inflate(&strm, Z_FULL_FLUSH);
-			inflateEnd(&strm);
-			if ((ret != Z_OK && ret != Z_STREAM_END) || strm.avail_in != 0 || strm.avail_out != 0)
-			{
-				cemuLog_log(LogType::Force, "RPLLoader: Error while inflating data for section {}", sectionIndex);
-				rplLoaderContext->hasError = true;
-				delete uSection;
-				return nullptr;
-			}
+			cemuLog_log(LogType::Force, "RPLLoader: Error while inflating data for section {}", sectionIndex);
+			rplLoaderContext->hasError = true;
+			delete uSection;
+			return nullptr;
 		}
 	}
 	else
@@ -1261,23 +1257,9 @@ bool RPLLoader_ApplyRelocs(RPLModule* rplLoaderContext, sint32 relaSectionIndex,
 		relocData = (uint8*)malloc(relocUncompressedSize);
 		relocSize = relocUncompressedSize;
 		// decompress
-		int ret;
-		z_stream strm;
-		strm.zalloc = Z_NULL;
-		strm.zfree = Z_NULL;
-		strm.opaque = Z_NULL;
-		ret = inflateInit(&strm);
-		if (ret == Z_OK)
-		{
-			strm.avail_in = (uint32)section->sectionSize - 4;
-			strm.next_in = relocRawData + 4;
-			strm.avail_out = relocUncompressedSize;
-			strm.next_out = relocData;
-			ret = inflate(&strm, Z_FULL_FLUSH);
-			cemu_assert_debug(ret == Z_OK || ret == Z_STREAM_END);
-			cemu_assert_debug(strm.avail_in == 0 && strm.avail_out == 0);
-			inflateEnd(&strm);
-		}
+		bool inflated = RPLLoader_InflateSection(relocData, relocUncompressedSize, relocRawData + 4, (uint32)section->sectionSize - 4);
+		cemu_assert_debug(inflated);
+		(void)inflated;
 	}
 	else
 	{
@@ -1493,26 +1475,13 @@ void RPLLoader_BeginCemuhookCRC(RPLModule* rpl)
 			}
 			memoryAllocated = true;
 			// decompress
-			z_stream strm;
-			strm.zalloc = Z_NULL;
-			strm.zfree = Z_NULL;
-			strm.opaque = Z_NULL;
-			inflateInit(&strm);
-			strm.avail_in = sectionCompressedSize - 4;
-			strm.next_in = rpl->RPLRawData.data() + (uint32)sectionFileOffset + 4;
-			strm.avail_out = decompressedSize;
-			strm.next_out = (Bytef*)rawData;
-			auto ret = inflate(&strm, Z_FULL_FLUSH);
-			if (ret != Z_OK && ret != Z_STREAM_END || strm.avail_in != 0 || strm.avail_out != 0)
+			if (!RPLLoader_InflateSection((uint8*)rawData, decompressedSize, rpl->RPLRawData.data() + (uint32)sectionFileOffset + 4, sectionCompressedSize - 4))
 			{
 				cemuLog_logDebug(LogType::Force, "RPLLoader-CRC: Unable to decompress section {}", i);
-				cemuLog_logDebug(LogType::Force, "zRet {} availIn {} availOut {}", ret, (sint32)strm.avail_in, (sint32)strm.avail_out);
 				cemu_assert_debug(false);
 				free(rawData);
-				inflateEnd(&strm);
 				continue;
 			}
-			inflateEnd(&strm);
 		}
 		else
 		{

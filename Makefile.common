@@ -22,10 +22,11 @@ PACK_TOOL       := $(GEN_DIR)/pack_graphic_packs$(HOST_EXE)
 # The community graphic packs, compiled in (src/libretro/LibretroGraphicPacks.cpp)
 GRAPHIC_PACKS_DIR := $(DEP_DIR)/cemu_graphic_packs
 PACK_TOOL_SOURCES := $(CORE_DIR)/tools/pack_graphic_packs.c \
-	$(addprefix $(DEP_DIR)/zlib/,adler32.c compress.c crc32.c deflate.c trees.c zutil.c)
+	$(addprefix $(LRC_DIR)/,encodings/encoding_deflate.c encodings/encoding_crc32.c \
+	features/features_cpu.c compat/compat_strl.c time/rtime.c)
 $(PACK_TOOL): $(PACK_TOOL_SOURCES)
 	@mkdir -p $(@D)
-	$(HOSTCC) -O2 -I$(DEP_DIR)/zlib $(PACK_TOOL_SOURCES) -o $@
+	$(HOSTCC) -O2 -I$(LRC_DIR)/include $(PACK_TOOL_SOURCES) -o $@
 # The packs' names have spaces, which make cannot take as prerequisites:
 # a stamp with a checksum of the tree's listing stands in for them, and is
 # rewritten only when that changes.
@@ -302,6 +303,7 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/Cafe/OS/libs/sysapp/sysapp.cpp \
 	$(CORE_DIR)/src/Cafe/OS/libs/vpad/vpad.cpp \
 	$(CORE_DIR)/src/Cafe/OS/libs/zlib125/zlib125.cpp \
+	$(CORE_DIR)/src/Cafe/OS/libs/zlib125/zlib125_stream.cpp \
 	$(CORE_DIR)/src/Cafe/TitleList/GameInfo.cpp \
 	$(CORE_DIR)/src/Cafe/TitleList/SaveInfo.cpp \
 	$(CORE_DIR)/src/Cafe/TitleList/SaveList.cpp \
@@ -366,6 +368,7 @@ CORE_SOURCES_CXX += \
 	$(CORE_DIR)/src/util/crypto/aes128.cpp \
 	$(CORE_DIR)/src/util/crypto/crc32.cpp \
 	$(CORE_DIR)/src/util/crypto/md5.cpp \
+	$(CORE_DIR)/src/util/helpers/Deflate.cpp \
 	$(CORE_DIR)/src/util/helpers/Serializer.cpp \
 	$(CORE_DIR)/src/util/helpers/helpers.cpp \
 	$(CORE_DIR)/src/util/highresolutiontimer/HighResolutionTimer.cpp \
@@ -484,7 +487,7 @@ CORE_FLAGS := -DENABLE_LIBRETRO -DRETRO_CORE -DVK_NO_PROTOTYPES \
 	-I$(SRC_DIR)/gui -I$(SRC_DIR)/gui/interface -I$(SRC_DIR)/libretro -I$(SRC_DIR)/resource \
 	-I$(DEP_DIR)/Vulkan-Headers/include \
 	-I$(DEP_DIR)/imgui -I$(DEP_DIR)/glm -I$(DEP_DIR)/fmt/include \
-	-I$(DEP_DIR)/pugixml/src -I$(DEP_DIR)/zlib -I$(DEP_DIR)/zstd/lib \
+	-I$(DEP_DIR)/pugixml/src \
 	-I$(DEP_DIR)/boost-compat \
 	-I$(DEP_DIR)/curl-compat/include -I$(DEP_DIR)/libusb-config \
 	-I$(LRC_DIR)/include
@@ -552,6 +555,8 @@ LRC_SOURCES_C := \
 	$(LRC_DIR)/crypto/pk.c \
 	$(LRC_DIR)/crypto/x509.c \
 	$(LRC_DIR)/encodings/encoding_base64.c \
+	$(LRC_DIR)/encodings/encoding_crc32.c \
+	$(LRC_DIR)/encodings/encoding_deflate.c \
 	$(LRC_DIR)/encodings/encoding_rzstd.c \
 	$(LRC_DIR)/encodings/encoding_utf.c \
 	$(LRC_DIR)/encodings/encoding_xxh64.c \
@@ -641,24 +646,6 @@ endif
 PUGIXML_SOURCES_CXX := $(DEP_DIR)/pugixml/src/pugixml.cpp
 PUGIXML_FLAGS := -w
 
-ZLIB_SOURCES_C := $(addprefix $(DEP_DIR)/zlib/,adler32.c compress.c crc32.c deflate.c gzclose.c gzlib.c gzread.c gzwrite.c infback.c inffast.c inflate.c inftrees.c trees.c uncompr.c zutil.c)
-ZLIB_FLAGS := -w
-ifneq ($(OS_WIN),1)
-   ZLIB_FLAGS += -DHAVE_UNISTD_H
-endif
-
-ZSTD_SOURCES_C := $(addprefix $(DEP_DIR)/zstd/lib/, \
-	common/debug.c common/entropy_common.c common/error_private.c common/fse_decompress.c common/pool.c common/threading.c common/xxhash.c common/zstd_common.c compress/fse_compress.c compress/hist.c compress/huf_compress.c compress/zstd_compress.c compress/zstd_compress_literals.c compress/zstd_compress_sequences.c compress/zstd_compress_superblock.c compress/zstd_double_fast.c compress/zstd_fast.c compress/zstd_lazy.c compress/zstd_ldm.c compress/zstd_opt.c compress/zstd_preSplit.c compress/zstdmt_compress.c decompress/huf_decompress.c decompress/zstd_ddict.c decompress/zstd_decompress.c decompress/zstd_decompress_block.c)
-ZSTD_SOURCES_ASM :=
-ZSTD_FLAGS := -I$(DEP_DIR)/zstd/lib -I$(DEP_DIR)/zstd/lib/common -DZSTD_MULTITHREAD -w
-ifeq ($(ARCH_X86_64),1)
-   ifneq ($(OS_WIN),1)
-      ZSTD_SOURCES_ASM += $(DEP_DIR)/zstd/lib/decompress/huf_decompress_amd64.S
-   else
-      ZSTD_FLAGS += -DZSTD_DISABLE_ASM
-   endif
-endif
-
 LIBUSB_DIR := $(DEP_DIR)/libusb/libusb
 LIBUSB_SOURCES_C := $(addprefix $(LIBUSB_DIR)/,core.c descriptor.c hotplug.c io.c strerror.c sync.c)
 ifneq (,$(filter 1,$(OS_LINUX) $(OS_ANDROID)))
@@ -679,7 +666,7 @@ LIBUSB_FLAGS := -I$(DEP_DIR)/libusb-config -I$(LIBUSB_DIR) -w
 XBYAK_SOURCES_CXX := $(DEP_DIR)/xbyak_aarch64/src/xbyak_aarch64_impl.cpp $(DEP_DIR)/xbyak_aarch64/src/util_impl.cpp
 XBYAK_FLAGS := -I$(DEP_DIR)/xbyak_aarch64 -I$(DEP_DIR)/xbyak_aarch64/xbyak_aarch64 -w
 
-LIB_GROUPS := CORE CURLCOMPAT LRC IH264D IMGUI FMT PUGIXML ZLIB ZSTD
+LIB_GROUPS := CORE CURLCOMPAT LRC IH264D IMGUI FMT PUGIXML
 ifeq ($(HAVE_LIBUSB),1)
    LIB_GROUPS += LIBUSB
 endif

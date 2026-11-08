@@ -1,5 +1,5 @@
 #pragma once
-#include <zlib.h>
+#include "util/helpers/Deflate.h"
 #include "nn_olv_Common.h"
 
 namespace nn
@@ -173,8 +173,9 @@ namespace nn
 				if (!TestFlags(_this, FLAGS::HAS_BODY_MEMO))
 					return OLV_RESULT_MISSING_DATA;
 				// uncompress TGA
-				uLongf decompressedSize = maxSize;
-				if (uncompress((uint8*)bodyMemoOut, &decompressedSize, (uint8*)_this->compressedMemoBody, _this->compressedMemoBodySize) != Z_OK)
+				size_t decompressedSize = maxSize;
+				size_t compressedSize = _this->compressedMemoBodySize;
+				if (Deflate::Uncompress((uint8*)bodyMemoOut, decompressedSize, (uint8*)_this->compressedMemoBody, compressedSize) != Deflate::Result::Ok)
 				{
 					cemuLog_log(LogType::Force, "DownloadedSystemTopicData::GetTitleIconData: uncompress failed");
 					return OLV_RESULT_INVALID_TEXT_FIELD; // status
@@ -373,8 +374,9 @@ namespace nn
 						return OLV_RESULT_INVALID_PTR;
 					if (iconDataMaxSize < 0x1002C)
 						return OLV_RESULT_NOT_ENOUGH_SIZE;
-					uLongf decompressedSize = iconDataMaxSize;
-					if (uncompress((uint8*)iconDataOut, &decompressedSize, (uint8*)_this->iconData, _this->iconDataSize) != Z_OK)
+					size_t decompressedSize = iconDataMaxSize;
+					size_t compressedSize = _this->iconDataSize;
+					if (Deflate::Uncompress((uint8*)iconDataOut, decompressedSize, (uint8*)_this->iconData, compressedSize) != Deflate::Result::Ok)
 					{
 						cemuLog_log(LogType::Force, "DownloadedSystemTopicData::GetTitleIconData: uncompress failed");
 						return OLV_RESULT_INVALID_TEXT_FIELD; // status

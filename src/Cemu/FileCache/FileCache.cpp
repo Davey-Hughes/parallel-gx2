@@ -3,7 +3,7 @@
 
 #include <mutex>
 #include <condition_variable>
-#include "zlib.h"
+#include "util/helpers/Deflate.h"
 #include "Common/FileStream.h"
 
 struct FileCacheAsyncJob
@@ -305,14 +305,11 @@ void FileCache::fileCache_updateFiletable(sint32 extraEntriesToAllocate)
 
 uint8* _fileCache_compressFileData(const uint8* fileData, uint32 fileSize, sint32& compressedSize)
 {
-	// compress data using zlib deflate
+	// compress data as a zlib stream
 	// stores the size of the uncompressed file in the first 4 bytes
-	Bytef* uncompressedInput = (Bytef*)fileData;
-	uLongf uncompressedLen = fileSize;
-	uLongf compressedLen = compressBound(fileSize);
-	Bytef* compressedData = (Bytef*)malloc(4 + compressedLen);
-	int zret = compress2(compressedData + 4, &compressedLen, uncompressedInput, uncompressedLen, 4); // level 4 has good compression to performance ratio
-	if (zret != Z_OK)
+	size_t compressedLen = Deflate::CompressBound(fileSize);
+	uint8* compressedData = (uint8*)malloc(4 + compressedLen);
+	if (!compressedData || !Deflate::Compress(compressedData + 4, compressedLen, fileData, fileSize, 4)) // level 4 has good compression to performance ratio
 	{
 		free(compressedData);
 		return nullptr;
@@ -321,7 +318,7 @@ uint8* _fileCache_compressFileData(const uint8* fileData, uint32 fileSize, sint3
 	compressedData[1] = ((uint32)fileSize >> 16) & 0xFF;
 	compressedData[2] = ((uint32)fileSize >> 8) & 0xFF;
 	compressedData[3] = ((uint32)fileSize >> 0) & 0xFF;
-	compressedSize = 4 + compressedLen;
+	compressedSize = (sint32)(4 + compressedLen);
 	return compressedData;
 }
 
@@ -339,12 +336,11 @@ bool _uncompressFileData(const uint8* rawData, size_t rawSize, std::vector<uint8
 	fileSize |= ((uint32)rawData[2] << 8);
 	fileSize |= ((uint32)rawData[3] << 0);
 	// allocate buffer
-	Bytef* compressedInput = (Bytef*)rawData + 4;
-	uLongf compressedLen = (uLongf)(rawSize - 4);
-	uLongf uncompressedLen = fileSize;
+	const uint8* compressedInput = rawData + 4;
+	size_t compressedLen = rawSize - 4;
+	size_t uncompressedLen = fileSize;
 	dataOut.resize(fileSize);
-	int zret = uncompress2(dataOut.data(), &uncompressedLen, compressedInput, &compressedLen);
-	if (zret != Z_OK)
+	if (Deflate::Uncompress(dataOut.data(), uncompressedLen, compressedInput, compressedLen) != Deflate::Result::Ok)
 	{
 		dataOut.clear();
 		return false;

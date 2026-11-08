@@ -1,5 +1,5 @@
 #include "nn_olv_Common.h"
-#include <zlib.h>
+#include "util/helpers/Deflate.h"
 
 namespace nn
 {
@@ -140,17 +140,18 @@ namespace nn
 			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
 				return false;
 
-			uLongf bufferSize = *pOutSize;
-			int result = uncompress(pOutBuffer, &bufferSize, pInBuffer, inSize);
+			size_t bufferSize = *pOutSize;
+			size_t srcSize = inSize;
+			Deflate::Result result = Deflate::Uncompress(pOutBuffer, bufferSize, pInBuffer, srcSize);
 
-			if (result == Z_OK)
+			if (result == Deflate::Result::Ok)
 			{
 				*pOutSize = static_cast<unsigned int>(bufferSize);
 				return true;
 			}
 			else
 			{
-				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown decompression error";
+				const char* error_msg = (result == Deflate::Result::OutOfMemory) ? "Insufficient memory" : "Unknown decompression error";
 				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
 				return false;
 			}
@@ -161,17 +162,16 @@ namespace nn
 			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
 				return false;
 
-			uLongf bufferSize = *pOutSize;
-			int result = compress(pOutBuffer, &bufferSize, pInBuffer, inSize);
+			size_t bufferSize = *pOutSize;
 
-			if (result == Z_OK)
+			if (Deflate::Compress(pOutBuffer, bufferSize, pInBuffer, inSize))
 			{
 				*pOutSize = static_cast<unsigned int>(bufferSize);
 				return true;
 			}
 			else
 			{
-				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown compression error";
+				const char* error_msg = "Unknown compression error";
 				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
 				return false;
 			}

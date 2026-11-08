@@ -138,6 +138,20 @@ jobs:
           make -C test/zarchive clean
           SANITIZER=address,undefined ./test/zarchive/run_tests.sh
 
+      - name: "zlib and Zstandard"
+        # libretro-common's deflate and rzstd in the core: zlib's own streams,
+        # the console's zlib125 a byte at a time, standalone Cemu's shader
+        # and pipeline cache entries, the graphic packs through the pack tool;
+        # plain, under ThreadSanitizer, under ASan + UBSan. The core's
+        # precompiled header wants fmt and glm.
+        run: |
+          git submodule update --init --depth 1 dependencies/fmt dependencies/glm
+          ./test/compression/run_tests.sh
+          make -C test/compression clean
+          SANITIZER=thread ./test/compression/run_tests.sh
+          make -C test/compression clean
+          SANITIZER=address,undefined ./test/compression/run_tests.sh
+
       - name: "Shader compiler"
         # rslc, as the Vulkan renderer hands it GLSL: the core's own shaders,
         # the decompiler's shapes and every graphic pack shader it ships, each

@@ -1,4 +1,3 @@
-#include <zlib.h>
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/RPL/rpl_structs.h"
 #include "util/VirtualHeap/VirtualHeap.h"

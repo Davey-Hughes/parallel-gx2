@@ -4,7 +4,6 @@
 #include "Cemu/ncrypto/ncrypto.h" // for base64 decoder
 #include "util/helpers/helpers.h"
 #include <pugixml.hpp>
-#include <zlib.h>
 
 namespace nn
 {

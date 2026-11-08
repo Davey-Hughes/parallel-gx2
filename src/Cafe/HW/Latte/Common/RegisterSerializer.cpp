@@ -3,12 +3,27 @@
 #include "Cafe/HW/Latte/Common/RegisterSerializer.h"
 #include "Common/FileStream.h"
 
-#include <zstd.h>
-#include <zlib.h>
+#include <encodings/rzstd.h>
 
-// compression dictionary for pipeline Latte register data, initialized on boot
-ZSTD_CDict* s_c_regDict{};
-ZSTD_DDict* s_d_regDict{};
+// compression dictionary for pipeline Latte register data, initialized on
+// boot. The entries are Zstandard frames made with it, as standalone Cemu
+// makes them, so pipeline caches go between the two either way.
+rzstd_dict_t* s_regDict{};
+
+namespace
+{
+	// a decoder's scratch is 150 KiB: kept per thread rather than allocated per entry
+	rzstd_decoder_t* RegisterSerializer_threadDecoder()
+	{
+		struct Holder
+		{
+			rzstd_decoder_t* decoder = rzstd_decoder_new();
+			~Holder() { rzstd_decoder_free(decoder); }
+		};
+		thread_local Holder s_holder;
+		return s_holder.decoder;
+	}
+}
 
 struct GPURegSerializerMapping
 {
@@ -231,15 +246,14 @@ namespace Latte
 		_CompressZeros(regState.rawArray, GPUCompactedRegisterState::NUM_REGS, tmpBufferWriter);
 		auto rleCompressedData = tmpBufferWriter.getResult();
 		// second, compress using dictionary trained for RLE compressed register state
-		uint8 buffer[8 * 1024];
-		ZSTD_CCtx* const cctx = ZSTD_createCCtx();
-		size_t compressedSize = ZSTD_compress_usingCDict(cctx, buffer, sizeof(buffer), rleCompressedData.data(), rleCompressedData.size(), s_c_regDict);
-		ZSTD_freeCCtx(cctx);
-		cemu_assert(!ZSTD_isError(compressedSize));
+		std::vector<uint8> buffer(rzstd_compress_bound(rleCompressedData.size()));
+		size_t compressedSize = 0;
+		int r = rzstd_encode_dict(buffer.data(), buffer.size(), rleCompressedData.data(), rleCompressedData.size(), 9, s_regDict, &compressedSize);
+		cemu_assert(r == RZSTD_PROCESS_END && compressedSize < 8 * 1024);
 		// serialize
 		memWriter.writeBE<uint8>(0x01); // version
 		memWriter.writeBE<uint16>((uint16)compressedSize);
-		memWriter.writeData(buffer, compressedSize);
+		memWriter.writeData(buffer.data(), compressedSize);
 	}
 
 	bool DeserializeRegisterState(GPUCompactedRegisterState& regState, MemStreamReader& memReader)
@@ -256,9 +270,10 @@ namespace Latte
 			return false;
 		// decompress using zstd with dictionary
 		uint8 rleDataBuffer[8 * 1024];
-		ZSTD_DCtx* const dctx = ZSTD_createDCtx();
-		size_t rleDecompressedSize = ZSTD_decompress_usingDDict(dctx, rleDataBuffer, sizeof(rleDataBuffer), buffer, compressedSize, s_d_regDict);
-		ZSTD_freeDCtx(dctx);
+		rzstd_decoder_t* decoder = RegisterSerializer_threadDecoder();
+		size_t rleDecompressedSize = 0;
+		if (!decoder || rzstd_decode_reuse_dict(decoder, rleDataBuffer, sizeof(rleDataBuffer), buffer, compressedSize, s_regDict, &rleDecompressedSize) != RZSTD_PROCESS_END)
+			return false;
 		if (rleDecompressedSize == 0 || rleDecompressedSize > sizeof(rleDataBuffer))
 			return false;
 		// decompress RLE
@@ -295,13 +310,11 @@ extern const uint8 s_regDataDict[];
 RunAtCemuBoot _loadPipelineCompressionDictionary([]()
 {
 	// decompress and load dict
-	static std::vector<uint8> s_dictData;
-	s_dictData.resize(0x1B800);
-	ZSTD_decompress(s_dictData.data(), s_dictData.size(), s_regDataDict, 0x5AD2);
-	s_c_regDict = ZSTD_createCDict(s_dictData.data(), s_dictData.size(), 9);
-	s_d_regDict = ZSTD_createDDict(s_dictData.data(), s_dictData.size());
-	cemu_assert_debug(s_c_regDict);
-	cemu_assert_debug(s_d_regDict);
+	std::vector<uint8> dictData(0x1B800);
+	size_t dictSize = 0;
+	rzstd_decode(dictData.data(), dictData.size(), s_regDataDict, 0x5AD2, &dictSize);
+	s_regDict = rzstd_dict_new(dictData.data(), dictSize);
+	cemu_assert_debug(s_regDict);
 
 	Latte::UnitTestPipelineSerialization();
 });
